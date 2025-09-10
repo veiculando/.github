@@ -1,0 +1,127 @@
+name: Project — Set Status (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      organization:
+        description: "Org login (ex.: veiculando)"
+        required: true
+        type: string
+      project_number:
+        description: "Número do Project v2 da org"
+        required: true
+        type: number
+      repo:
+        description: "Nome do repositório (sem owner)"
+        required: true
+        type: string
+      issue_number:
+        description: "Número da issue (ex.: 123)"
+        required: true
+        type: number
+      status_name:
+        description: "Nome exato da opção de Status (ex.: In progress, Code Review, QA/Staging, Ready for Prod, Done)"
+        required: true
+        type: string
+    secrets:
+      GH_PROJECT_TOKEN:
+        required: true
+
+jobs:
+  set-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve IDs (Project, Status field/options, Issue)
+        id: ids
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          ORG: ${{ inputs.organization }}
+          PROJ_NUM: ${{ inputs.project_number }}
+          REPO: ${{ inputs.repo }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          STATUS_NAME: ${{ inputs.status_name }}
+        run: |
+          set -euo pipefail
+          # Project info
+          gh api graphql -f query='
+            query($org:String!, $num:Int!){
+              organization(login:$org){
+                projectV2(number:$num){
+                  id
+                  fields(first:50){
+                    nodes{
+                      ... on ProjectV2Field { id name }
+                      ... on ProjectV2SingleSelectField {
+                        id name options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f org="$ORG" -F num="$PROJ_NUM" > project.json
+
+          PROJ_ID=$(jq -r '.data.organization.projectV2.id' project.json)
+          STATUS_FIELD_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .id' project.json)
+          OPTION_ID=$(jq -r --arg n "$STATUS_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .options[] | select(.name==$n) | .id' project.json)
+
+          if [ -z "$OPTION_ID" ] || [ "$OPTION_ID" = "null" ]; then
+            echo "Status option '$STATUS_NAME' not found. Create it in the Project first." >&2
+            exit 1
+          fi
+
+          # Issue node id
+          OWNER="$ORG"
+          gh api graphql -f query='
+            query($owner:String!, $repo:String!, $num:Int!){
+              repository(owner:$owner, name:$repo){
+                issue(number:$num){ id }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F num="$ISSUE_NUM" > issue.json
+          ISSUE_ID=$(jq -r '.data.repository.issue.id' issue.json)
+
+          # Check if item already in project
+          gh api graphql -f query='
+            query($id:ID!){
+              node(id:$id){
+                ... on Issue {
+                  projectItems(first:50){
+                    nodes { id project { number } }
+                  }
+                }
+              }
+            }' -f id="$ISSUE_ID" > items.json
+
+          ITEM_ID=$(jq -r --argjson n "$PROJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number==$n) | .id' items.json)
+
+          if [ -z "$ITEM_ID" ]; then
+            # Add to project
+            gh api graphql -f query='
+              mutation($p:ID!, $c:ID!){
+                addProjectV2ItemById(input:{projectId:$p, contentId:$c}) { item { id } }
+              }' -f p="$PROJ_ID" -f c="$ISSUE_ID" > add.json
+            ITEM_ID=$(jq -r '.data.addProjectV2ItemById.item.id' add.json)
+          fi
+
+          echo "PROJ_ID=$PROJ_ID" >> $GITHUB_OUTPUT
+          echo "STATUS_FIELD_ID=$STATUS_FIELD_ID" >> $GITHUB_OUTPUT
+          echo "OPTION_ID=$OPTION_ID" >> $GITHUB_OUTPUT
+          echo "ITEM_ID=$ITEM_ID" >> $GITHUB_OUTPUT
+
+      - name: Update Status field
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          PROJ_ID: ${{ steps.ids.outputs.PROJ_ID }}
+          ITEM_ID: ${{ steps.ids.outputs.ITEM_ID }}
+          STATUS_FIELD_ID: ${{ steps.ids.outputs.STATUS_FIELD_ID }}
+          OPTION_ID: ${{ steps.ids.outputs.OPTION_ID }}
+        run: |
+          set -euo pipefail
+          gh api graphql -f query='
+            mutation($p:ID!, $i:ID!, $f:ID!, $o:String!){
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$p,
+                itemId:$i,
+                fieldId:$f,
+                value:{ singleSelectOptionId:$o }
+              }) { clientMutationId }
+            }' -f p="$PROJ_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD_ID" -f o="$OPTION_ID"

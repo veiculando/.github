@@ -1,0 +1,98 @@
+name: "_Set Issue Type (reusable)"
+on:
+  workflow_call:
+    inputs:
+      # mapa de prefixos do título -> Issue Type
+      match_prefixes:
+        required: false
+        type: string
+        default: "BUG:Bug,STORY:Story,TASK:Task"
+
+jobs:
+  set-type:
+    permissions:
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Detect desired type (marker or title)"
+        id: detect
+        shell: bash
+        run: |
+          body=$(jq -r '.issue.body' <<<'${{ toJson(github.event) }}')
+          title="${{ github.event.issue.title }}"
+          desired=""
+
+          # 1) marcador invisível: <!-- issue-type: X -->
+          if [[ "$body" =~ issue-type:\ ([A-Za-z0-9 _-]+) ]]; then
+            desired="${BASH_REMATCH[1]}"
+          fi
+
+          # 2) fallback por prefixo de título ([BUG], [STORY], [TASK], etc.)
+          if [[ -z "$desired" ]]; then
+            IFS=',' read -ra MAP <<< "${{ inputs.match_prefixes }}"
+            for kv in "${MAP[@]}"; do
+              KEY="${kv%%:*}"
+              VAL="${kv#*:}"
+              shopt -s nocasematch
+              if [[ "$title" =~ ^\[\s*${KEY}\s*\] ]]; then
+                desired="$VAL"
+                break
+              fi
+            done
+          fi
+
+          echo "type=$desired" >> "$GITHUB_OUTPUT"
+
+      - name: "Stop if nothing to set"
+        if: steps.detect.outputs.type == ''
+        run: echo "No type detected; skipping."
+
+      # Preferimos GraphQL (issueTypeId) — mais confiável
+      - name: "Update Issue.type via GraphQL"
+        if: steps.detect.outputs.type != ''
+        id: update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          NUMBER: ${{ github.event.issue.number }}
+          DESIRED: ${{ steps.detect.outputs.type }}
+        shell: bash
+        run: |
+          # Busca issueId e tipos disponíveis no repositório
+          DATA=$(gh api graphql -f query='
+            query($owner:String!, $repo:String!, $number:Int!){
+              repository(owner:$owner,name:$repo){
+                issue(number:$number){ id }
+                issueTypes(first:100){ nodes{ id name } }
+              }
+            }' -F owner="$OWNER" -F repo="$REPO" -F number="$NUMBER")
+
+          ISSUE_ID=$(jq -r '.data.repository.issue.id' <<<"$DATA")
+          TYPE_ID=$(jq -r --arg NAME "$DESIRED" '.data.repository.issueTypes.nodes[] | select(.name==$NAME) | .id' <<<"$DATA")
+
+          if [[ -z "$TYPE_ID" || "$TYPE_ID" == "null" ]]; then
+            echo "Type '$DESIRED' not found in repo. Falling back to label." >&2
+            exit 2
+          fi
+
+          gh api graphql -f query='
+            mutation($issueId:ID!, $issueTypeId:ID!){
+              updateIssue(input:{id:$issueId, issueTypeId:$issueTypeId}){ issue{ id } }
+            }' -F issueId="$ISSUE_ID" -F issueTypeId="$TYPE_ID"
+
+      # Fallback elegante: aplica label "type: X" se Issue Type não estiver habilitado
+      - name: "Fallback: apply label type"
+        if: failure() && steps.detect.outputs.type != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABEL: "${{ format('type: {0}', steps.detect.outputs.type ) }}"
+        shell: bash
+        run: |
+          gh api -X POST -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/labels" \
+            -f name="$LABEL" -f color="ededed" -f description="Fallback quando Issue Types não está disponível" || true
+
+          gh api -X POST -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels" \
+            -f labels="$LABEL"

@@ -1,0 +1,184 @@
+name: Project — Status from Events
+
+on:
+  push:
+    branches:
+      - "feature/*" # In progress (opcional, conforme convenção de branch)
+  pull_request:
+    types: [opened, closed] # Code Review / QA-Staging / Done
+  issues:
+    types: [labeled] # Ready for Prod (UAT approved)
+
+jobs:
+  # ---- In progress (branch push) ----
+  extract-issue-from-branch:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      issue: ${{ steps.extract.outputs.issue_number }}
+    steps:
+      - name: Extract issue number from branch name
+        id: extract
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          if [[ "$BRANCH" =~ ^feature/([0-9]+)- ]]; then
+            echo "issue_number=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "issue_number=" >> "$GITHUB_OUTPUT"
+          fi
+
+  set-in-progress:
+    needs: extract-issue-from-branch
+    if: needs.extract-issue-from-branch.outputs.issue != ''
+    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    with:
+      organization: veiculando
+      project_number: 1
+      repo: ${{ github.event.repository.name }}
+      issue_number: ${{ needs.extract-issue-from-branch.outputs.issue }}
+      status_name: In progress
+    secrets:
+      GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+  # ---- Code Review (PR opened) ----
+  collect-pr-issues-opened:
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.collect.outputs.issues }}
+    steps:
+      - name: Collect closing issues from PR
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api graphql -f query='
+            query($owner:String!, $repo:String!, $n:Int!){
+              repository(owner:$owner, name:$repo){
+                pullRequest(number:$n){
+                  closingIssuesReferences(first:20){ nodes{ number } }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F n="$PR_NUM" > pr.json
+          ISSUES=$(jq -c '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number]' pr.json)
+          echo "issues=$ISSUES" >> $GITHUB_OUTPUT
+
+  set-code-review:
+    needs: collect-pr-issues-opened
+    if: needs.collect-pr-issues-opened.outputs.issues != '' && needs.collect-pr-issues-opened.outputs.issues != '[]'
+    strategy:
+      matrix:
+        issue: ${{ fromJSON(needs.collect-pr-issues-opened.outputs.issues) }}
+    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    with:
+      organization: veiculando
+      project_number: 1
+      repo: ${{ github.event.repository.name }}
+      issue_number: ${{ matrix.issue }}
+      status_name: Code Review
+    secrets:
+      GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+  # ---- QA/Staging (PR merged into develop) ----
+  collect-pr-issues-merged-develop:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'develop'
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.collect.outputs.issues }}
+    steps:
+      - name: Collect closing issues from merged PR
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api graphql -f query='
+            query($owner:String!, $repo:String!, $n:Int!){
+              repository(owner:$owner, name:$repo){
+                pullRequest(number:$n){
+                  closingIssuesReferences(first:20){ nodes{ number } }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F n="$PR_NUM" > pr.json
+          ISSUES=$(jq -c '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number]' pr.json)
+          echo "issues=$ISSUES" >> $GITHUB_OUTPUT
+
+  set-qa-staging:
+    needs: collect-pr-issues-merged-develop
+    if: needs.collect-pr-issues-merged-develop.outputs.issues != '' && needs.collect-pr-issues-merged-develop.outputs.issues != '[]'
+    strategy:
+      matrix:
+        issue: ${{ fromJSON(needs.collect-pr-issues-merged-develop.outputs.issues) }}
+    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    with:
+      organization: veiculando
+      project_number: 1
+      repo: ${{ github.event.repository.name }}
+      issue_number: ${{ matrix.issue }}
+      status_name: QA/Staging
+    secrets:
+      GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+  # ---- Ready for Prod (Issue labeled uat-approved) ----
+  ready-for-prod-on-issue-label:
+    if: github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'uat-approved'
+    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    with:
+      organization: veiculando
+      project_number: 1
+      repo: ${{ github.event.repository.name }}
+      issue_number: ${{ github.event.issue.number }}
+      status_name: Ready for Prod
+    secrets:
+      GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+  # ---- Done (PR merged into main) ----
+  collect-pr-issues-merged-main:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.collect.outputs.issues }}
+    steps:
+      - name: Collect closing issues from merged PR
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api graphql -f query='
+            query($owner:String!, $repo:String!, $n:Int!){
+              repository(owner:$owner, name:$repo){
+                pullRequest(number:$n){
+                  closingIssuesReferences(first:20){ nodes{ number } }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F n="$PR_NUM" > pr.json
+          ISSUES=$(jq -c '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number]' pr.json)
+          echo "issues=$ISSUES" >> $GITHUB_OUTPUT
+
+  set-done:
+    needs: collect-pr-issues-merged-main
+    if: needs.collect-pr-issues-merged-main.outputs.issues != '' && needs.collect-pr-issues-merged-main.outputs.issues != '[]'
+    strategy:
+      matrix:
+        issue: ${{ fromJSON(needs.collect-pr-issues-merged-main.outputs.issues) }}
+    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    with:
+      organization: veiculando
+      project_number: 1
+      repo: ${{ github.event.repository.name }}
+      issue_number: ${{ matrix.issue }}
+      status_name: Done
+    secrets:
+      GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
