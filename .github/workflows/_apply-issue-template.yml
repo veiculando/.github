@@ -1,0 +1,109 @@
+name: _Apply Issue Template (reusable)
+on:
+  workflow_call:
+    inputs:
+      # Se não detectar nada, qual template usar?
+      default_type:
+        required: false
+        type: string
+        default: "Story" # Bug | Story | Task
+      # Mapeia prefixo do título -> arquivo de template
+      match_prefixes:
+        required: false
+        type: string
+        default: "BUG:bug.md,STORY:story.md,TASK:task.md"
+
+jobs:
+  apply:
+    permissions:
+      issues: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect if we should skip (body already filled)
+        id: decide
+        run: |
+          body=$(jq -r '.issue.body // ""' <<<'${{ toJson(github.event) }}')
+          # Se já tem estrutura ou muito texto, não mexe
+          if [ ${#body} -ge 120 ] || grep -qiE '(^\*\*Como um\*\*|^##|^###|^[*-] )' <<<"$body"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Detect desired template (marker or title prefix)
+        id: detect
+        if: steps.decide.outputs.skip != 'true'
+        shell: bash
+        run: |
+          body=$(jq -r '.issue.body // ""' <<<'${{ toJson(github.event) }}')
+          title="${{ github.event.issue.title }}"
+          desired_file=""
+
+          # 1) Marcador invisível no corpo: <!-- issue-type: X -->
+          if [[ "$body" =~ issue-type:\ ([A-Za-z0-9 _-]+) ]]; then
+            case "${BASH_REMATCH[1]}" in
+              Bug) desired_file="bug.md" ;;
+              Story) desired_file="story.md" ;;
+              Task) desired_file="task.md" ;;
+            esac
+          fi
+
+          # 2) Fallback por prefixo do título ([BUG]/[STORY]/[TASK])
+          if [ -z "$desired_file" ]; then
+            IFS=',' read -ra MAP <<< "${{ inputs.match_prefixes }}"
+            for kv in "${MAP[@]}"; do
+              KEY="${kv%%:*}"
+              FILE="${kv#*:}"
+              shopt -s nocasematch
+              if [[ "$title" =~ ^\[\s*${KEY}\s*\] ]]; then
+                desired_file="$FILE"; break
+              fi
+            done
+          fi
+
+          # 3) Default (ex.: Story)
+          if [ -z "$desired_file" ]; then
+            case "${{ inputs.default_type }}" in
+              Bug) desired_file="bug.md" ;;
+              Story) desired_file="story.md" ;;
+              Task) desired_file="task.md" ;;
+              *) desired_file="story.md" ;;
+            esac
+          fi
+
+          echo "file=$desired_file" >> $GITHUB_OUTPUT
+
+      - name: Checkout templates
+        if: steps.decide.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/ISSUE_TEMPLATE
+          sparse-checkout-cone-mode: false
+
+      - name: Build new body from template
+        id: build
+        if: steps.decide.outputs.skip != 'true'
+        shell: bash
+        run: |
+          path=".github/ISSUE_TEMPLATE/${{ steps.detect.outputs.file }}"
+          if [ ! -f "$path" ]; then
+            echo "Template $path não encontrado; saindo."
+            exit 0
+          fi
+          orig=$(jq -r '.issue.body // ""' <<<'${{ toJson(github.event) }}')
+
+          # Remove o front-matter (entre os dois primeiros '---')
+          body=$(awk 'f{print} /^---/{c++} c==2{f=1}' "$path")
+          [ -z "$body" ] && body="$(cat "$path")"
+
+          printf "%s\n\n---\n\n### Contexto original\n%s\n" "$body" "$orig" > new_body.md
+
+      - name: Apply template to issue body
+        if: steps.build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
+            -f body@"new_body.md"
