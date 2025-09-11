@@ -19,6 +19,7 @@ jobs:
       issues: write
       contents: read
     runs-on: ubuntu-latest
+
     steps:
       - name: Detect if we should skip (body already filled)
         id: decide
@@ -72,38 +73,46 @@ jobs:
 
           echo "file=$desired_file" >> $GITHUB_OUTPUT
 
-      - name: Checkout templates
+      # ▶️ Checkout do repositório CENTRAL de templates
+      - name: Checkout central templates
         if: steps.decide.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            .github/ISSUE_TEMPLATE
-          sparse-checkout-cone-mode: false
+          repository: veiculando/.github
+          ref: main
+          path: central
 
       - name: Build new body from template
         id: build
         if: steps.decide.outputs.skip != 'true'
         shell: bash
         run: |
-          path=".github/ISSUE_TEMPLATE/${{ steps.detect.outputs.file }}"
+          path="central/.github/ISSUE_TEMPLATE/${{ steps.detect.outputs.file }}"
+          echo "Path esperado: $path"
           if [ ! -f "$path" ]; then
             echo "Template $path não encontrado; saindo."
             exit 0
           fi
+
           orig=$(jq -r '.issue.body // ""' <<<'${{ toJson(github.event) }}')
 
-          # Remove o front-matter (entre os dois primeiros '---')
+          # Remove o front-matter (entre os dois primeiros ---)
           body=$(awk 'f{print} /^---/{c++} c==2{f=1}' "$path")
           [ -z "$body" ] && body="$(cat "$path")"
 
           printf "%s\n\n---\n\n### Contexto original\n%s\n" "$body" "$orig" > new_body.md
 
+          # Monta JSON seguro para PATCH usando jq --rawfile
+          jq -n --rawfile b new_body.md '{ body: $b }' > payload.json
+          echo "built=true" >> $GITHUB_OUTPUT
+
+      # ▶️ PATCH usando --input (evita erro 'invalid key: body@...')
       - name: Apply template to issue body
-        if: steps.build.outcome == 'success'
+        if: steps.build.outputs.built == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api -X PATCH \
             -H "Accept: application/vnd.github+json" \
             "/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
-            -f body@"new_body.md"
+            --input payload.json

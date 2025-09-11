@@ -15,7 +15,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
-      issue: ${{ steps.extract.outputs.issue_number }}
+      issue: "${{ steps.extract.outputs.issue_number }}"
     steps:
       - name: Extract issue number from branch name
         id: extract
@@ -73,7 +73,7 @@ jobs:
     if: needs.collect-pr-issues-opened.outputs.issues != '' && needs.collect-pr-issues-opened.outputs.issues != '[]'
     strategy:
       matrix:
-        issue: ${{ fromJSON(needs.collect-pr-issues-opened.outputs.issues) }}
+        issue: "${{ fromJSON(needs.collect-pr-issues-opened.outputs.issues) }}"
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
@@ -116,7 +116,7 @@ jobs:
     if: needs.collect-pr-issues-merged-develop.outputs.issues != '' && needs.collect-pr-issues-merged-develop.outputs.issues != '[]'
     strategy:
       matrix:
-        issue: ${{ fromJSON(needs.collect-pr-issues-merged-develop.outputs.issues) }}
+        issue: "${{ fromJSON(needs.collect-pr-issues-merged-develop.outputs.issues) }}"
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
@@ -172,7 +172,7 @@ jobs:
     if: needs.collect-pr-issues-merged-main.outputs.issues != '' && needs.collect-pr-issues-merged-main.outputs.issues != '[]'
     strategy:
       matrix:
-        issue: ${{ fromJSON(needs.collect-pr-issues-merged-main.outputs.issues) }}
+        issue: "${{ fromJSON(needs.collect-pr-issues-merged-main.outputs.issues) }}"
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
