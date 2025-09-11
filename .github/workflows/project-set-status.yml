@@ -18,7 +18,7 @@ on:
       issue_number:
         description: "Número da issue (ex.: 123)"
         required: true
-        type: number
+        type: string
       status_name:
         description: "Nome exato da opção de Status (ex.: In progress, Code Review, QA/Staging, Ready for Prod, Done)"
         required: true
