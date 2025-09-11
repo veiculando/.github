@@ -173,7 +173,7 @@ jobs:
     strategy:
       matrix:
         issue: ${{ fromJSON(needs.collect-pr-issues-merged-main.outputs.issues) }}
-    uses: veiculando/.github/.github/workflows/project-set-status.yml@main
+    uses: veiculando/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
       project_number: 1
