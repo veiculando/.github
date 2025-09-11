@@ -1,7 +1,7 @@
 ---
 name: "Story"
 about: "História de usuário"
-title: "[STORY] Título curto"
+title: ""
 assignees: []
 ---
 

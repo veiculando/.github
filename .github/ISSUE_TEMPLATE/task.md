@@ -1,7 +1,7 @@
 ---
 name: "Task"
 about: "Tarefa operacional pequena ou atividade técnica"
-title: "[TASK] Título curto"
+title: ""
 assignees: []
 ---
 
@@ -9,6 +9,7 @@ assignees: []
 Descreva em 1 frase o que será entregue.
 
 **Checklist**
+
 - [ ] Passo 1
 - [ ] Passo 2
 - [ ] Passo 3

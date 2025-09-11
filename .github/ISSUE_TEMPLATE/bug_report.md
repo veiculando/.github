@@ -1,7 +1,7 @@
 ---
 name: "Bug"
 about: "Reporte um problema rapidamente"
-title: "[BUG] Descrição curta"
+title: ""
 assignees: []
 ---
 
