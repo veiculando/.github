@@ -37,7 +37,7 @@ jobs:
       project_number: 1
       repo: ${{ github.event.repository.name }}
       issue_number: ${{ needs.extract-issue-from-branch.outputs.issue }}
-      status_name: In progress
+      status_name: In Progress
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
 

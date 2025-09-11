@@ -18,12 +18,12 @@ jobs:
         id: detect
         shell: bash
         run: |
-          body=$(jq -r '.issue.body' <<<'${{ toJson(github.event) }}')
+          body=$(jq -r '.issue.body // ""' <<<'${{ toJson(github.event) }}')
           title="${{ github.event.issue.title }}"
           desired=""
 
-          # 1) marcador invisível: <!-- issue-type: X -->
-          if [[ "$body" =~ issue-type:\ ([A-Za-z0-9 _-]+) ]]; then
+          # 1) marcador invisível: <!-- issue-type: Bug|Story|Task -->
+          if [[ "$body" =~ issue-type:[[:space:]]*(Bug|Story|Task) ]]; then
             desired="${BASH_REMATCH[1]}"
           fi
 
@@ -89,10 +89,13 @@ jobs:
           LABEL: "${{ format('type: {0}', steps.detect.outputs.type ) }}"
         shell: bash
         run: |
+          # cria a label se não existir
           gh api -X POST -H "Accept: application/vnd.github+json" \
             "/repos/${{ github.repository }}/labels" \
-            -f name="$LABEL" -f color="ededed" -f description="Fallback quando Issue Types não está disponível" || true
+            -f name="$LABEL" -f color="ededed" \
+            -f description="Fallback quando Issue Types não está disponível" || true
 
+          # adiciona a label como ARRAY (evita 422)
           gh api -X POST -H "Accept: application/vnd.github+json" \
             "/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels" \
-            -f labels="$LABEL"
+            -f labels[]="$LABEL"
