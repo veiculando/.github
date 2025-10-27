@@ -125,3 +125,5 @@ jobs:
                 value:{ singleSelectOptionId:$o }
               }) { clientMutationId }
             }' -f p="$PROJ_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD_ID" -f o="$OPTION_ID"
+
+  ### THIS WORKS
