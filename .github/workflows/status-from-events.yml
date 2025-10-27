@@ -1,92 +1,85 @@
-name: Project — Status from Events
+name: Project - Status from Events
 
 on:
   push:
     branches:
-      - "feature/*" # In progress (opcional, conforme convenção de branch)
+      - "feature/*" # In Progress (opcional, conforme convencao de branch)
   pull_request:
     types: [opened, closed] # Code Review / QA-Staging / Done
   issues:
     types: [labeled] # Ready for Prod (UAT approved)
 
 jobs:
-  # ---- In progress (branch push) ----
-  extract-issue-from-branch:
-    if: github.event_name == 'push'
+  detect-issue-number:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
-      issue: "${{ steps.extract.outputs.issue_number }}"
+      issue: ${{ steps.extract.outputs.issue }}
     steps:
-      - name: Extract issue number from branch name
+      - name: Detect issue number
         id: extract
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BRANCH_REF: ${{ github.ref_name }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
         run: |
           set -euo pipefail
-          BRANCH="${GITHUB_REF_NAME}"
-          if [[ "$BRANCH" =~ ^feature/([0-9]+)- ]]; then
-            echo "issue_number=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "issue_number=" >> "$GITHUB_OUTPUT"
+          ISSUE=""
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            REF="${BRANCH_REF}"
+            if [[ "$REF" =~ ^feature/([0-9]+)- ]]; then
+              ISSUE="${BASH_REMATCH[1]}"
+            fi
+          elif [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            REF="${PR_HEAD_REF}"
+            TITLE="${PR_TITLE}"
+            if [[ "$REF" =~ ^feature/([0-9]+)- ]]; then
+              ISSUE="${BASH_REMATCH[1]}"
+            elif [[ "$TITLE" =~ \#([0-9]+) ]]; then
+              ISSUE="${BASH_REMATCH[1]}"
+            fi
           fi
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
+  # ---- In Progress (branch push) ----
   set-in-progress:
-    needs: extract-issue-from-branch
-    if: needs.extract-issue-from-branch.outputs.issue != ''
+    needs: detect-issue-number
+    if: github.event_name == 'push' && needs.detect-issue-number.outputs.issue != ''
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
       project_number: 1
       repo: ${{ github.event.repository.name }}
-      issue_number: ${{ needs.extract-issue-from-branch.outputs.issue }}
+      issue_number: "${{ needs.detect-issue-number.outputs.issue }}"
       status_name: In Progress
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
 
-  # ---- Utilities for PR events ----
-  extract-issue-from-pr:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    outputs:
-      issue: "${{ steps.extract.outputs.issue_number }}"
-    steps:
-      - name: Extract issue number from PR context
-        id: extract
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          ISSUE=""
-          if [[ -n "${HEAD_REF:-}" ]] && [[ "$HEAD_REF" =~ ([0-9]+) ]]; then
-            ISSUE="${BASH_REMATCH[1]}"
-          elif [[ -n "${PR_TITLE:-}" ]] && [[ "$PR_TITLE" =~ \#([0-9]+) ]]; then
-            ISSUE="${BASH_REMATCH[1]}"
-          fi
-          echo "issue_number=$ISSUE" >> "$GITHUB_OUTPUT"
-
   # ---- Code Review (PR opened) ----
   set-code-review:
-    needs: extract-issue-from-pr
-    if: github.event_name == 'pull_request' && github.event.action == 'opened' && needs.extract-issue-from-pr.outputs.issue != ''
+    needs: detect-issue-number
+    if: github.event_name == 'pull_request' && github.event.action == 'opened' && needs.detect-issue-number.outputs.issue != ''
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
       project_number: 1
       repo: ${{ github.event.repository.name }}
-      issue_number: ${{ needs.extract-issue-from-pr.outputs.issue }}
+      issue_number: "${{ needs.detect-issue-number.outputs.issue }}"
       status_name: Code Review
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
 
   # ---- QA/Staging (PR merged into develop) ----
   set-qa-staging:
-    needs: extract-issue-from-pr
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'develop' && needs.extract-issue-from-pr.outputs.issue != ''
+    needs: detect-issue-number
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'develop' && needs.detect-issue-number.outputs.issue != ''
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
       project_number: 1
       repo: ${{ github.event.repository.name }}
-      issue_number: ${{ needs.extract-issue-from-pr.outputs.issue }}
+      issue_number: "${{ needs.detect-issue-number.outputs.issue }}"
       status_name: QA/Staging
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
@@ -99,21 +92,75 @@ jobs:
       organization: veiculando
       project_number: 1
       repo: ${{ github.event.repository.name }}
-      issue_number: ${{ github.event.issue.number }}
+      issue_number: "${{ github.event.issue.number }}"
       status_name: Ready for Prod
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
 
   # ---- Done (PR merged into main) ----
+  collect-ready-for-prod:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.collect.outputs.issues }}
+    steps:
+      - name: Collect Ready for Prod issues
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          gh api graphql --paginate -f query='
+            query($owner:String!, $project:Int!, $endCursor:String) {
+              organization(login: $owner) {
+                projectV2(number: $project) {
+                  items(first: 100, after: $endCursor) {
+                    nodes {
+                      content {
+                        __typename
+                        ... on Issue {
+                          number
+                          repository { name }
+                        }
+                      }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                          name
+                        }
+                      }
+                    }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                  }
+                }
+              }
+            }
+          ' -f owner="$OWNER" -F project=1 -F endCursor=null > items.json
+          ISSUES=$(jq -s -c --arg repo "$REPO" '
+            [.[].data.organization.projectV2.items.nodes[]?
+             | select(.content.__typename == "Issue" and .content.repository.name == $repo)
+             | {number: .content.number, status: (.fieldValueByName.name // "")}
+             | select(.status == "Ready for Prod")
+             | .number]
+          ' items.json)
+          echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
+
   set-done:
-    needs: extract-issue-from-pr
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && needs.extract-issue-from-pr.outputs.issue != ''
+    needs: collect-ready-for-prod
+    if: needs.collect-ready-for-prod.outputs.issues != '' && needs.collect-ready-for-prod.outputs.issues != '[]'
+    strategy:
+      matrix:
+        issue: ${{ fromJSON(needs.collect-ready-for-prod.outputs.issues) }}
     uses: veiculando/.github/.github/workflows/project-set-status.yml@main
     with:
       organization: veiculando
       project_number: 1
       repo: ${{ github.event.repository.name }}
-      issue_number: ${{ needs.extract-issue-from-pr.outputs.issue }}
+      issue_number: "${{ matrix.issue }}"
       status_name: Done
     secrets:
       GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
