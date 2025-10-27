@@ -1,6 +1,15 @@
 name: Project - Status from Events
 
 on:
+  workflow_call:
+    inputs:
+      project_url:
+        type: string
+        required: false
+        default: "https://github.com/orgs/veiculando/projects/1"
+    secrets:
+      GH_PROJECT_TOKEN:
+        required: true
   push:
     branches:
       - "feature/*" # In Progress (opcional, conforme convencao de branch)
