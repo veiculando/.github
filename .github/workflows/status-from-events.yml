@@ -34,18 +34,24 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title || '' }}
         run: |
           set -euo pipefail
+          find_issue() {
+            local value="${1:-}"
+            local match=""
+            if [[ "$value" =~ (^|/)([0-9]+)[-_] ]]; then
+              match="${BASH_REMATCH[2]}"
+            elif [[ "$value" =~ (^|/)([0-9]+)$ ]]; then
+              match="${BASH_REMATCH[2]}"
+            fi
+            echo "$match"
+          }
           ISSUE=""
           if [[ "${EVENT_NAME}" == "push" ]]; then
-            REF="${BRANCH_REF}"
-            if [[ "$REF" =~ ^feature/([0-9]+)- ]]; then
-              ISSUE="${BASH_REMATCH[1]}"
-            fi
+            ISSUE="$(find_issue "$BRANCH_REF")"
           elif [[ "${EVENT_NAME}" == "pull_request" ]]; then
             REF="${PR_HEAD_REF}"
             TITLE="${PR_TITLE}"
-            if [[ "$REF" =~ ^feature/([0-9]+)- ]]; then
-              ISSUE="${BASH_REMATCH[1]}"
-            elif [[ "$TITLE" =~ \#([0-9]+) ]]; then
+            ISSUE="$(find_issue "$REF")"
+            if [[ -z "$ISSUE" && "$TITLE" =~ \#([0-9]+) ]]; then
               ISSUE="${BASH_REMATCH[1]}"
             fi
           fi
