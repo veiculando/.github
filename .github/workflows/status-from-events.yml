@@ -11,8 +11,7 @@ on:
       GH_PROJECT_TOKEN:
         required: true
   push:
-    branches:
-      - "feature/*" # In Progress (opcional, conforme convencao de branch)
+    # Qualquer branch; o job detecta o número da issue a partir do nome
   pull_request:
     types: [opened, closed] # Code Review / QA-Staging / Done
   issues:
