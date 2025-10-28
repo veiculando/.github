@@ -2,9 +2,9 @@ milestones:
   - title: Sprint 1
     description: Subir código em novo ambiente
     state: open
-    due_on: 2025-10-24
+    due_on: 2025-10-24T23:59:59Z
   - title: Sprint 2
     description: Corrigir bugs iniciais
     state: open
-    due_on: 2025-11-07
+    due_on: 2025-11-07T23:59:59Z
 ### THIS WORKS
