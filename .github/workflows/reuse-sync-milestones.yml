@@ -22,9 +22,6 @@ jobs:
           sudo curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Install GitHub CLI
-        uses: cli/cli@v2
-
       - name: Create/Update only listed milestones (no delete)
         env:
           REPO: ${{ github.repository }} # repo CHAMADOR (alvo)
