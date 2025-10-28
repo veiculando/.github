@@ -1,0 +1,66 @@
+name: Reusable • Sync only org milestones
+on:
+  workflow_call: {}
+
+jobs:
+  sync-milestones:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout standards from Veiculando/.github
+        uses: actions/checkout@v4
+        with:
+          repository: Veiculando/.github
+          ref: main
+
+      - name: Install jq & yq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          sudo curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Install GitHub CLI
+        uses: cli/cli@v2
+
+      - name: Create/Update only listed milestones (no delete)
+        env:
+          REPO: ${{ github.repository }} # repo CHAMADOR (alvo)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Target repo: $REPO"
+
+          yq -r '.milestones[] | @json' standards/milestones.yml | while read -r row; do
+            title=$(echo "$row" | jq -r '.title')
+            description=$(echo "$row" | jq -r '.description // ""')
+            state=$(echo "$row" | jq -r '.state // "open"')
+            due_on=$(echo "$row" | jq -r '.due_on // empty')
+
+            number=$(gh api repos/$REPO/milestones --paginate \
+              | jq -r --arg t "$title" '.[] | select(.title==$t) | .number' | head -n1 || true)
+
+            if [ -n "$number" ]; then
+              # Atualiza milestone existente
+              if [ -n "$due_on" ]; then
+                gh api --method PATCH repos/$REPO/milestones/$number \
+                  -f title="$title" -f state="$state" -f description="$description" -f due_on="$due_on"
+              else
+                gh api --method PATCH repos/$REPO/milestones/$number \
+                  -f title="$title" -f state="$state" -f description="$description"
+              fi
+              echo "Updated milestone: $title"
+            else
+              # Cria milestone se não existir
+              if [ -n "$due_on" ]; then
+                gh api --method POST repos/$REPO/milestones \
+                  -f title="$title" -f state="$state" -f description="$description" -f due_on="$due_on"
+              else
+                gh api --method POST repos/$REPO/milestones \
+                  -f title="$title" -f state="$state" -f description="$description"
+              fi
+              echo "Created milestone: $title"
+            fi
+          done
