@@ -1,0 +1,9 @@
+milestones:
+  - title: Sprint 1
+    description: Subir código em novo ambiente
+    state: open
+    due_on: 2025-10-24
+  - title: Sprint 2
+    description: Corrigir bugs iniciais
+    state: open
+    due_on: 2025-11-07

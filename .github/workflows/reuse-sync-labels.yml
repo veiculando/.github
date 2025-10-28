@@ -1,0 +1,21 @@
+name: Reusable • Sync only org labels
+on:
+  workflow_call: {}
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}   # este próprio repo .github
+          ref: ${{ github.ref }}
+      - name: Run Labeler (no delete)
+        uses: crazy-max/ghaction-github-labeler@v5
+        with:
+          yaml-file: standards/labels.yml
+          skip-delete: true         # NÃO remove labels que não estão no YAML
+          dry-run: false

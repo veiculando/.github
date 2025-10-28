@@ -1,0 +1,7 @@
+- name: technical-debt
+  color: "6e7781"
+  description: Refatoração, dívida técnica, limpeza
+
+- name: uat-approved
+  color: "0e8a16"
+  description: Homologado pelo cliente (UAT aprovado)
