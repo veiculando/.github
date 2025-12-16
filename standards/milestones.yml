@@ -7,4 +7,12 @@ milestones:
     description: Corrigir bugs iniciais
     state: open
     due_on: 2025-11-07T23:59:59Z
+  - title: Sprint 3
+    description: Subir código em novo ambiente
+    state: open
+    due_on: 2025-11-28T23:59:59Z
+  - title: Sprint 4
+    description: Atualizar .NET e integração com Google Maps
+    state: open
+    due_on: 2025-12-31T23:59:59Z
 ### THIS WORKS
