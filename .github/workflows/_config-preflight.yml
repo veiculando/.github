@@ -1,0 +1,93 @@
+name: _config-preflight
+
+# Verifica que o ambiente-alvo tem TODOS os segredos exigidos pelo manifesto
+# ANTES de qualquer passo de deploy.
+#
+# Por que existe: remover um segredo do codigo sem provisiona-lo em lugar nenhum
+# ja derrubou producao neste projeto. A falha aparecia tarde - na primeira
+# consulta ao banco, no primeiro e-mail - e uma de cada vez, produzindo o ciclo
+# "corrige, sobe, descobre a proxima". Este job move a descoberta para antes do
+# deploy e reporta TUDO o que falta de uma vez.
+#
+# Chame-o como dependencia (needs:) do job de deploy. Se ele falhar, o deploy
+# nao roda e producao segue no ar com a versao anterior.
+#
+# NENHUM valor de segredo e impresso: o job compara apenas NOMES.
+
+on:
+  workflow_call:
+    inputs:
+      manifest-path:
+        description: Caminho do manifesto no repositorio chamador.
+        type: string
+        default: 'config-manifest.json'
+      verificar-opcionais:
+        description: >-
+          Alem das obrigatorias, avisa (sem reprovar) sobre as opcionais
+          ausentes. Util para notar telemetria desligada por engano.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Conferir segredos contra o manifesto
+        env:
+          # toJSON(secrets) traz o mapa de segredos disponiveis neste contexto.
+          # So as CHAVES sao usadas; os valores nunca chegam ao log. O GitHub
+          # ainda mascara valores por seguranca, mas a garantia real aqui e nao
+          # imprimi-los.
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+          MANIFESTO: ${{ inputs.manifest-path }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$MANIFESTO" ]; then
+            echo "::error::Manifesto nao encontrado: $MANIFESTO"
+            exit 1
+          fi
+
+          printf '%s' "$SECRETS_JSON" | jq -r 'keys[]' | sort -u > /tmp/disponiveis.txt
+          jq -r '.obrigatorias[].secret' "$MANIFESTO" | sort -u > /tmp/exigidos.txt
+
+          comm -23 /tmp/exigidos.txt /tmp/disponiveis.txt > /tmp/ausentes.txt
+
+          echo "Segredos obrigatorios no manifesto: $(wc -l < /tmp/exigidos.txt)"
+          echo "Disponiveis neste contexto:        $(wc -l < /tmp/disponiveis.txt)"
+          echo
+
+          if [ -s /tmp/ausentes.txt ]; then
+            echo "::error::Deploy bloqueado: $(wc -l < /tmp/ausentes.txt) segredo(s) obrigatorio(s) ausente(s)."
+            echo
+            echo "Faltam os seguintes GitHub Secrets:"
+            while read -r s; do
+              env_name=$(jq -r --arg s "$s" '.obrigatorias[]|select(.secret==$s)|.env' "$MANIFESTO")
+              desc=$(jq -r --arg s "$s" '.obrigatorias[]|select(.secret==$s)|.descricao' "$MANIFESTO")
+              echo "  * $s"
+              echo "      variavel em runtime: $env_name"
+              echo "      $desc"
+            done < /tmp/ausentes.txt
+            echo
+            echo "Cadastre-os em Settings > Secrets and variables > Actions."
+            echo "Producao NAO foi tocada: o deploy nao chegou a rodar."
+            exit 1
+          fi
+
+          echo "Todos os segredos obrigatorios estao presentes."
+
+          if [ "${{ inputs.verificar-opcionais }}" = "true" ]; then
+            jq -r '.opcionais[]?.secret' "$MANIFESTO" | sort -u > /tmp/opcionais.txt
+            comm -23 /tmp/opcionais.txt /tmp/disponiveis.txt > /tmp/opc_ausentes.txt || true
+            if [ -s /tmp/opc_ausentes.txt ]; then
+              echo
+              echo "::warning::Segredos OPCIONAIS ausentes (nao bloqueiam o deploy):"
+              sed 's/^/  * /' /tmp/opc_ausentes.txt
+            fi
+          fi
