@@ -2,17 +2,20 @@ name: _dotnet-ci
 
 # Workflow reutilizavel de CI .NET para o ecossistema WhiteLabel.
 #
-# Particularidade que motiva os inputs de core: o BFF nao e autocontido. O
-# csproj referencia cinco projetos do core por caminho relativo (..\Veiculando\),
-# entao o build so funciona se o core estiver presente como DIRETORIO IRMAO com
-# esse nome exato. Por isso este workflow faz dois checkouts e fixa o core numa
-# ref imutavel lida de um arquivo versionado (core-ref-file), em vez de seguir
-# um branch movel: build de hoje e de tres meses atras precisam resolver o mesmo
-# codigo de core.
+# Atende dois formatos de repositorio, controlados por `needs-core`:
 #
-# O core e PRIVADO e os repositorios WhiteLabel sao PUBLICOS. PR vindo de fork
-# nao recebe secrets, entao o checkout do core falharia com erro obscuro de
-# permissao. O guard abaixo faz a falha ser explicita e imediata (fail closed).
+#  - AUTOCONTIDO (core Veiculando): um checkout, build da solution.
+#  - DEPENDENTE DO CORE (BFF WhiteLabel): o csproj referencia cinco projetos do
+#    core por caminho relativo (..\Veiculando\), entao o core precisa existir
+#    como DIRETORIO IRMAO com esse nome exato. Faz dois checkouts e fixa o core
+#    numa ref imutavel lida de arquivo versionado (core-ref-file), em vez de
+#    seguir um branch movel: build de hoje e de tres meses atras precisam
+#    resolver o mesmo codigo de core.
+#
+# No modo dependente, o core e PRIVADO e os repositorios WhiteLabel sao
+# PUBLICOS. PR vindo de fork nao recebe secrets, entao o checkout do core
+# falharia com erro obscuro de permissao. O guard faz a falha ser explicita e
+# imediata (fail closed).
 
 on:
   workflow_call:
@@ -23,10 +26,30 @@ on:
         default: '8.0.x'
       app-dir:
         description: >-
-          Diretorio onde o repositorio chamador e clonado. Precisa ser irmao de
-          core-dir para os ProjectReference relativos resolverem.
+          Diretorio onde o repositorio chamador e clonado. Quando needs-core e
+          true, precisa ser irmao de core-dir para os ProjectReference
+          relativos resolverem.
         type: string
         required: true
+      project:
+        description: >-
+          Alvo de restore/build/test: uma solution ou um csproj, relativo a
+          app-dir. Num repositorio sem .sln, aponte para o PROJETO DE TESTE - ele
+          arrasta o projeto sob teste via ProjectReference, enquanto um alvo
+          implicito alcancaria apenas o csproj da raiz e deixaria os testes sem
+          build.
+        type: string
+        required: true
+      run-tests:
+        description: >-
+          Executa dotnet test. Desligue em repositorios cuja suite ainda depende
+          de infraestrutura real e reprovaria por ambiente, nao por regressao.
+        type: boolean
+        default: true
+      needs-core:
+        description: Faz checkout adicional do core como diretorio irmao.
+        type: boolean
+        default: false
       core-repo:
         description: Repositorio do core no formato owner/nome.
         type: string
@@ -43,10 +66,6 @@ on:
           Primeira linha nao vazia que nao comece com '#'.
         type: string
         default: 'core.ref'
-      test-project:
-        description: Projeto de teste, relativo a app-dir.
-        type: string
-        required: true
       vulnerability-allowlist:
         description: >-
           Arquivo com os GHSA ja aceitos formalmente, relativo a app-dir.
@@ -56,7 +75,7 @@ on:
     secrets:
       core-repo-token:
         description: PAT com leitura de Contents no repositorio do core.
-        required: true
+        required: false
 
 permissions:
   contents: read
@@ -66,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Guard - token do core presente
+        if: inputs.needs-core
         env:
           CORE_TOKEN: ${{ secrets.core-repo-token }}
         run: |
@@ -84,6 +104,7 @@ jobs:
           path: ${{ inputs.app-dir }}
 
       - name: Resolver ref fixada do core
+        if: inputs.needs-core
         id: coreref
         run: |
           set -euo pipefail
@@ -102,6 +123,7 @@ jobs:
           echo "Core fixado em $SHA"
 
       - name: Checkout do core na ref fixada
+        if: inputs.needs-core
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.core-repo }}
@@ -116,31 +138,27 @@ jobs:
 
       - name: Restore
         working-directory: ${{ inputs.app-dir }}
-        # Restore/build miram o projeto de TESTE, nao a raiz. O repositorio nao
-        # tem .sln e o csproj da API vive na raiz: um "dotnet restore" sem alvo
-        # alcancaria apenas a API e o projeto de teste chegaria sem restore nem
-        # build, fazendo o "dotnet test --no-build" adiante falhar. O projeto de
-        # teste referencia a API, entao mirar nele compila os dois.
-        run: dotnet restore ${{ inputs.test-project }}
+        run: dotnet restore ${{ inputs.project }}
 
       - name: Build
         working-directory: ${{ inputs.app-dir }}
-        run: dotnet build ${{ inputs.test-project }} --configuration Release --no-restore
+        run: dotnet build ${{ inputs.project }} --configuration Release --no-restore
 
       - name: Testes
+        if: inputs.run-tests
         working-directory: ${{ inputs.app-dir }}
-        # Testcontainers sobe SQL Server via daemon Docker do runner, que o
-        # ubuntu-latest ja expoe. Sem --no-build o dotnet test recompilaria em
-        # Debug e descartaria o resultado do passo anterior.
+        # Quando ha Testcontainers, o SQL Server sobe pelo daemon Docker do
+        # runner, que o ubuntu-latest ja expoe. Sem --no-build o dotnet test
+        # recompilaria em Debug e descartaria o resultado do passo anterior.
         run: >-
-          dotnet test ${{ inputs.test-project }}
+          dotnet test ${{ inputs.project }}
           --configuration Release
           --no-build
           --logger "trx;LogFileName=test-results.trx"
           --results-directory ../test-results
 
       - name: Publicar resultado dos testes
-        if: always()
+        if: always() && inputs.run-tests
         uses: actions/upload-artifact@v4
         with:
           name: dotnet-test-results
@@ -152,6 +170,7 @@ jobs:
         working-directory: ${{ inputs.app-dir }}
         env:
           ALLOWLIST: ${{ inputs.vulnerability-allowlist }}
+          PROJECT: ${{ inputs.project }}
         # Politica (D9 do plano de CI/CD): vulnerabilidade High/Critical NOVA
         # reprova o build; as ja conhecidas ficam registradas no allowlist com
         # responsavel e prazo. Um gate cru de "falhe em qualquer High" nasceria
@@ -159,7 +178,7 @@ jobs:
         # primeira semana - o allowlist mantem o gate util e honesto.
         run: |
           set -uo pipefail
-          dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          dotnet list "$PROJECT" package --vulnerable --include-transitive 2>&1 | tee vuln.txt
 
           # Linhas de pacote vulneravel comecam com '>' e trazem severidade e URL do advisory.
           grep -E '^\s*>' vuln.txt \

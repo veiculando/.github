@@ -1,0 +1,85 @@
+name: _security-ci
+
+# Gates de supply chain independentes de linguagem (decisao D9 do plano de
+# CI/CD 6f6eaa94): varredura de segredos e revisao de dependencias em PR.
+#
+# Contexto que motiva a varredura de segredos ser BLOQUEANTE: cinco segredos de
+# producao ja estiveram versionados neste ecossistema (item C1) - senha do Azure
+# SQL, secret do JWT, AccountKey do Blob, PAT da organizacao e chave do Google
+# Maps. Foram removidos do working tree, mas seguem recuperaveis em refs/pull/*
+# (item C2). Um gate automatico e o que impede a terceira ocorrencia.
+
+on:
+  workflow_call:
+    inputs:
+      gitleaks-version:
+        description: Versao fixada da imagem do gitleaks.
+        type: string
+        default: 'v8.18.4'
+      dependency-review:
+        description: >-
+          Executa o dependency review. Exige GitHub Advanced Security em
+          repositorio PRIVADO; em repositorio publico e gratuito. Desligue nos
+          privados sem GHAS para nao reprovar por falta de licenca, que nao e
+          sinal de defeito.
+        type: boolean
+        default: true
+      fail-on-severity:
+        description: Severidade minima que reprova o dependency review.
+        type: string
+        default: 'high'
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # O gitleaks compara commits; sem o historico completo ele varre
+          # apenas o snapshot e um segredo introduzido e removido dentro da
+          # propria branch passaria despercebido.
+          fetch-depth: 0
+
+      - name: Varredura de segredos (gitleaks)
+        # Usa a imagem oficial em vez da Action: a Action exige GITLEAKS_LICENSE
+        # para contas de organizacao, o binario nao. Versao fixada de proposito -
+        # um scanner que muda sozinho transforma CI verde em CI vermelho sem
+        # ninguem ter mudado codigo.
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            "zricethezav/gitleaks:${{ inputs.gitleaks-version }}" \
+            detect --source=/repo --redact --verbose \
+            --report-format=sarif --report-path=/repo/gitleaks.sarif
+        # --redact impede que o proprio log do CI vire a nova fonte de
+        # vazamento, imprimindo o segredo encontrado em texto claro.
+
+      - name: Publicar relatorio
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          if-no-files-found: ignore
+
+  dependency-review:
+    if: inputs.dependency-review && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Exigido por comment-summary-in-pr: sem esta permissao a action falha ao
+      # tentar comentar, mascarando o resultado real da revisao.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Revisao de dependencias
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          comment-summary-in-pr: on-failure
