@@ -1,0 +1,213 @@
+name: _dotnet-ci
+
+# Workflow reutilizavel de CI .NET para o ecossistema WhiteLabel.
+#
+# Atende dois formatos de repositorio, controlados por `needs-core`:
+#
+#  - AUTOCONTIDO (core Veiculando): um checkout, build da solution.
+#  - DEPENDENTE DO CORE (BFF WhiteLabel): o csproj referencia cinco projetos do
+#    core por caminho relativo (..\Veiculando\), entao o core precisa existir
+#    como DIRETORIO IRMAO com esse nome exato. Faz dois checkouts e fixa o core
+#    numa ref imutavel lida de arquivo versionado (core-ref-file), em vez de
+#    seguir um branch movel: build de hoje e de tres meses atras precisam
+#    resolver o mesmo codigo de core.
+#
+# No modo dependente, o core e PRIVADO e os repositorios WhiteLabel sao
+# PUBLICOS. PR vindo de fork nao recebe secrets, entao o checkout do core
+# falharia com erro obscuro de permissao. O guard faz a falha ser explicita e
+# imediata (fail closed).
+
+on:
+  workflow_call:
+    inputs:
+      dotnet-version:
+        description: SDK .NET usado no build e nos testes.
+        type: string
+        default: '8.0.x'
+      app-dir:
+        description: >-
+          Diretorio onde o repositorio chamador e clonado. Quando needs-core e
+          true, precisa ser irmao de core-dir para os ProjectReference
+          relativos resolverem.
+        type: string
+        required: true
+      project:
+        description: >-
+          Alvo de restore/build/test: uma solution ou um csproj, relativo a
+          app-dir. Num repositorio sem .sln, aponte para o PROJETO DE TESTE - ele
+          arrasta o projeto sob teste via ProjectReference, enquanto um alvo
+          implicito alcancaria apenas o csproj da raiz e deixaria os testes sem
+          build.
+        type: string
+        required: true
+      run-tests:
+        description: >-
+          Executa dotnet test. Desligue em repositorios cuja suite ainda depende
+          de infraestrutura real e reprovaria por ambiente, nao por regressao.
+        type: boolean
+        default: true
+      needs-core:
+        description: Faz checkout adicional do core como diretorio irmao.
+        type: boolean
+        default: false
+      core-repo:
+        description: Repositorio do core no formato owner/nome.
+        type: string
+        default: 'veiculando/Veiculando'
+      core-dir:
+        description: >-
+          Nome do diretorio do core. DEVE bater com o segmento usado nos
+          ProjectReference do csproj (hoje "Veiculando").
+        type: string
+        default: 'Veiculando'
+      core-ref-file:
+        description: >-
+          Arquivo no repositorio chamador contendo o SHA do core a ser usado.
+          Primeira linha nao vazia que nao comece com '#'.
+        type: string
+        default: 'core.ref'
+      vulnerability-allowlist:
+        description: >-
+          Arquivo com os GHSA ja aceitos formalmente, relativo a app-dir.
+          Ausente = nenhuma vulnerabilidade tolerada.
+        type: string
+        default: '.github/vulnerability-allowlist.txt'
+    secrets:
+      core-repo-token:
+        description: PAT com leitura de Contents no repositorio do core.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard - token do core presente
+        if: inputs.needs-core
+        env:
+          CORE_TOKEN: ${{ secrets.core-repo-token }}
+        run: |
+          if [ -z "$CORE_TOKEN" ]; then
+            echo "::error::Secret 'core-repo-token' ausente."
+            echo "O core e privado e o build depende dele. PRs abertos a partir"
+            echo "de um fork nao recebem secrets, portanto nao podem ser"
+            echo "validados por este pipeline. Reabra o PR a partir de um branch"
+            echo "do proprio repositorio."
+            exit 1
+          fi
+
+      - name: Checkout do repositorio chamador
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.app-dir }}
+
+      - name: Resolver ref fixada do core
+        if: inputs.needs-core
+        id: coreref
+        run: |
+          set -euo pipefail
+          FILE="${{ inputs.app-dir }}/${{ inputs.core-ref-file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Arquivo de pin do core nao encontrado: $FILE"
+            exit 1
+          fi
+          SHA="$(grep -v '^[[:space:]]*#' "$FILE" | grep -v '^[[:space:]]*$' | head -n1 | tr -d '[:space:]')"
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Pin do core invalido: '$SHA'. Esperado SHA completo de 40 hex."
+            echo "Um SHA abreviado ou nome de branch nao garante build reproduzivel."
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Core fixado em $SHA"
+
+      - name: Checkout do core na ref fixada
+        if: inputs.needs-core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.core-repo }}
+          ref: ${{ steps.coreref.outputs.sha }}
+          token: ${{ secrets.core-repo-token }}
+          path: ${{ inputs.core-dir }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Restore
+        working-directory: ${{ inputs.app-dir }}
+        run: dotnet restore ${{ inputs.project }}
+
+      - name: Build
+        working-directory: ${{ inputs.app-dir }}
+        run: dotnet build ${{ inputs.project }} --configuration Release --no-restore
+
+      - name: Testes
+        if: inputs.run-tests
+        working-directory: ${{ inputs.app-dir }}
+        # Quando ha Testcontainers, o SQL Server sobe pelo daemon Docker do
+        # runner, que o ubuntu-latest ja expoe. Sem --no-build o dotnet test
+        # recompilaria em Debug e descartaria o resultado do passo anterior.
+        run: >-
+          dotnet test ${{ inputs.project }}
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory ../test-results
+
+      - name: Publicar resultado dos testes
+        if: always() && inputs.run-tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: test-results/
+          if-no-files-found: warn
+
+      - name: Analise de vulnerabilidades
+        if: always()
+        working-directory: ${{ inputs.app-dir }}
+        env:
+          ALLOWLIST: ${{ inputs.vulnerability-allowlist }}
+          PROJECT: ${{ inputs.project }}
+        # Politica (D9 do plano de CI/CD): vulnerabilidade High/Critical NOVA
+        # reprova o build; as ja conhecidas ficam registradas no allowlist com
+        # responsavel e prazo. Um gate cru de "falhe em qualquer High" nasceria
+        # vermelho por causa de advisories herdados do core e seria desligado na
+        # primeira semana - o allowlist mantem o gate util e honesto.
+        run: |
+          set -uo pipefail
+          dotnet list "$PROJECT" package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+
+          # Linhas de pacote vulneravel comecam com '>' e trazem severidade e URL do advisory.
+          grep -E '^\s*>' vuln.txt \
+            | grep -Ei '(High|Critical)' \
+            | sed -E 's#.*(GHSA-[0-9a-z-]+).*#\1#' \
+            | sort -u > found.txt || true
+
+          if [ ! -s found.txt ]; then
+            echo "Nenhuma vulnerabilidade High/Critical encontrada."
+            exit 0
+          fi
+
+          if [ -f "$ALLOWLIST" ]; then
+            grep -oE 'GHSA-[0-9a-z-]+' "$ALLOWLIST" | sort -u > allowed.txt
+          else
+            : > allowed.txt
+          fi
+
+          comm -23 found.txt allowed.txt > novos.txt
+
+          echo "--- High/Critical encontrados ---"; cat found.txt
+          echo "--- Aceitos formalmente ---"; cat allowed.txt
+
+          if [ -s novos.txt ]; then
+            echo "::error::Vulnerabilidade High/Critical nova detectada."
+            echo "Advisories nao presentes no allowlist ($ALLOWLIST):"
+            cat novos.txt
+            echo "Corrija a dependencia ou registre aceite de risco com prazo e responsavel."
+            exit 1
+          fi
+
+          echo "Todas as vulnerabilidades High/Critical estao sob aceite formal."

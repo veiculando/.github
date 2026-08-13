@@ -1,0 +1,69 @@
+name: _angular-ci
+
+# Workflow reutilizavel de CI Angular para os frontends WhiteLabel.
+#
+# Diferente do BFF, os frontends sao autocontidos: um unico checkout basta.
+#
+# Nota sobre o runner de testes: os projetos ainda usam Karma + Chrome. O
+# ubuntu-latest ja traz o Chrome estavel instalado, entao nao ha necessidade de
+# baixar browser. A migracao para Vitest esta prevista na Fase 1.5 do plano de
+# CI/CD; quando ocorrer, o passo de teste aqui muda e o CHROME_BIN sai.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Versao do Node. Angular 17 exige 18.13+ ou 20.9+.
+        type: string
+        default: '20'
+      working-directory:
+        description: Diretorio do projeto Angular dentro do repositorio.
+        type: string
+        default: '.'
+      npm-audit-level:
+        description: Nivel minimo que reprova o build no npm audit.
+        type: string
+        default: 'high'
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Instalar dependencias
+        # npm ci, nunca npm install: respeita o package-lock e falha se ele
+        # estiver dessincronizado do package.json, que e o comportamento que se
+        # quer num pipeline.
+        run: npm ci
+
+      - name: Build
+        run: npm run build -- --configuration production
+
+      - name: Testes
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        # --watch=false e obrigatorio: sem ele o ng test fica aguardando
+        # mudancas e o job so termina por timeout.
+        run: npm test -- --watch=false --browsers=ChromeHeadless --no-progress
+
+      - name: Auditoria de dependencias
+        if: always()
+        # Politica: npm audit informa sempre; reprova a partir do nivel
+        # configurado. Mantido como passo separado do build para que a falha
+        # seja legivel como problema de supply chain, nao de compilacao.
+        run: npm audit --audit-level=${{ inputs.npm-audit-level }}
