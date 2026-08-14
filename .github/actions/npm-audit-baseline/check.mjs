@@ -58,7 +58,7 @@ for (const vulnerability of Object.values(report.vulnerabilities ?? {})) {
       continue;
     }
 
-    const severity = via.severity ?? vulnerability.severity;
+    const severity = (via.severity ?? vulnerability.severity)?.toLowerCase();
     if (severityRank[severity] < severityRank[auditLevel]) {
       continue;
     }
@@ -71,9 +71,10 @@ for (const vulnerability of Object.values(report.vulnerabilities ?? {})) {
 }
 
 if (current.size === 0) {
-  const count = Object.values(report.metadata?.vulnerabilities ?? {})
-    .filter((_, index) => index >= severityRank[auditLevel])
-    .reduce((total, value) => total + value, 0);
+  const count = Object.entries(report.metadata?.vulnerabilities ?? {})
+    .filter(([severity]) =>
+      severity in severityRank && severityRank[severity] >= severityRank[auditLevel])
+    .reduce((total, [, value]) => total + value, 0);
   if (count > 0) {
     throw new Error('npm audit reportou vulnerabilidades bloqueantes sem IDs comparaveis.');
   }
