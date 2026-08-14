@@ -12,10 +12,10 @@ name: _dotnet-ci
 #    seguir um branch movel: build de hoje e de tres meses atras precisam
 #    resolver o mesmo codigo de core.
 #
-# No modo dependente, o core e PRIVADO e os repositorios WhiteLabel sao
-# PUBLICOS. PR vindo de fork nao recebe secrets, entao o checkout do core
-# falharia com erro obscuro de permissao. O guard faz a falha ser explicita e
-# imediata (fail closed).
+# No modo dependente, o core e os repositorios WhiteLabel sao PRIVADOS. O
+# checkout entre repositorios continua exigindo um token de leitura explicito;
+# o GITHUB_TOKEN do caller nao recebe acesso automatico ao repositorio irmao.
+# O guard faz a ausencia da credencial falhar cedo e de forma explicita.
 
 on:
   workflow_call:
