@@ -1,0 +1,29 @@
+name: npm audit baseline
+description: Reprova advisories npm novos sem esconder a divida pre-existente.
+
+inputs:
+  baseline:
+    description: Caminho do allowlist no repositorio chamador.
+    required: true
+    default: .github/npm-audit-allowlist.txt
+  audit-level:
+    description: Severidade minima bloqueante.
+    required: true
+    default: high
+
+runs:
+  using: composite
+  steps:
+    - name: Executar npm audit e comparar baseline
+      shell: bash
+      run: |
+        report="${RUNNER_TEMP}/npm-audit-${GITHUB_RUN_ID}-${GITHUB_JOB}.json"
+        npm audit --json > "${report}" || true
+        node "${GITHUB_ACTION_PATH}/check.mjs" \
+          "${report}" \
+          "${{ inputs.baseline }}" \
+          "${{ inputs.audit-level }}"
+
+branding:
+  icon: shield
+  color: purple
