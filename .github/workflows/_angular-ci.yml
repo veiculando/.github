@@ -3,23 +3,24 @@ name: _angular-ci
 # Workflow reutilizavel de CI Angular para os frontends WhiteLabel.
 #
 # Diferente do BFF, os frontends sao autocontidos: um unico checkout basta.
-#
-# Nota sobre o runner de testes: os projetos ainda usam Karma + Chrome. O
-# ubuntu-latest ja traz o Chrome estavel instalado, entao nao ha necessidade de
-# baixar browser. A migracao para Vitest esta prevista na Fase 1.5 do plano de
-# CI/CD; quando ocorrer, o passo de teste aqui muda e o CHROME_BIN sai.
+# O runner e selecionado pelo caller para permitir PRs independentes durante a
+# migracao: projetos legados continuam em Karma e os migrados usam Vitest.
 
 on:
   workflow_call:
     inputs:
       node-version:
-        description: Versao do Node. Angular 17 exige 18.13+ ou 20.9+.
+        description: Versao do Node compativel com o major do Angular.
         type: string
         default: '20'
       working-directory:
         description: Diretorio do projeto Angular dentro do repositorio.
         type: string
         default: '.'
+      test-runner:
+        description: Runner de testes do projeto (karma ou vitest).
+        type: string
+        default: 'karma'
       npm-audit-level:
         description: Nivel minimo que reprova o build no npm audit.
         type: string
@@ -49,6 +50,12 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
+      - name: Validar runner de testes
+        if: inputs.test-runner != 'karma' && inputs.test-runner != 'vitest'
+        run: |
+          echo "Runner de testes invalido: ${{ inputs.test-runner }}"
+          exit 1
+
       - name: Instalar dependencias
         # npm ci, nunca npm install: respeita o package-lock e falha se ele
         # estiver dessincronizado do package.json, que e o comportamento que se
@@ -58,12 +65,15 @@ jobs:
       - name: Build
         run: npm run build -- --configuration production
 
-      - name: Testes
+      - name: Testes (Karma)
+        if: inputs.test-runner == 'karma'
         env:
           CHROME_BIN: /usr/bin/google-chrome
-        # --watch=false e obrigatorio: sem ele o ng test fica aguardando
-        # mudancas e o job so termina por timeout.
         run: npm test -- --watch=false --browsers=ChromeHeadless --no-progress
+
+      - name: Testes (Vitest)
+        if: inputs.test-runner == 'vitest'
+        run: npm test -- --watch=false --no-progress
 
       - name: Auditoria de dependencias
         if: always()
