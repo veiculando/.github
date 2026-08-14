@@ -1,7 +1,9 @@
 name: _security-ci
 
 # Gates de supply chain independentes de linguagem (decisao D9 do plano de
-# CI/CD 6f6eaa94): varredura de segredos e revisao de dependencias em PR.
+# CI/CD 6f6eaa94): varredura de segredos sempre; dependency review apenas em
+# repositorios publicos ou licenciados. Repositorios privados no GitHub Free
+# usam as auditorias nativas de cada stack nos workflows de build.
 #
 # Contexto que motiva a varredura de segredos ser BLOQUEANTE: cinco segredos de
 # producao ja estiveram versionados neste ecossistema (item C1) - senha do Azure
@@ -23,7 +25,9 @@ on:
           privados sem GHAS para nao reprovar por falta de licenca, que nao e
           sinal de defeito.
         type: boolean
-        default: true
+        # Seguro por padrao para a estrategia da organizacao: todos os
+        # repositorios de produto sao privados no GitHub Free.
+        default: false
       fail-on-severity:
         description: Severidade minima que reprova o dependency review.
         type: string
