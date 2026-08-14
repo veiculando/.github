@@ -53,6 +53,17 @@ function advisoryId(via) {
 }
 
 const report = loadJson(reportPath);
+if (report.error) {
+  const detail = report.error.summary ?? report.error.message ?? JSON.stringify(report.error);
+  throw new Error(`npm audit falhou: ${detail}`);
+}
+if (
+  typeof report.vulnerabilities !== 'object' ||
+  typeof report.metadata?.vulnerabilities !== 'object'
+) {
+  throw new Error('Relatorio npm audit incompleto: vulnerabilidades ou metadados ausentes.');
+}
+
 const baseline = loadBaseline(baselinePath);
 const current = new Set();
 
