@@ -24,6 +24,10 @@ on:
         description: Nivel minimo que reprova o build no npm audit.
         type: string
         default: 'high'
+      npm-audit-baseline:
+        description: Arquivo versionado com os advisories pre-existentes aceitos.
+        type: string
+        default: '.github/npm-audit-allowlist.txt'
 
 permissions:
   contents: read
@@ -63,7 +67,10 @@ jobs:
 
       - name: Auditoria de dependencias
         if: always()
-        # Politica: npm audit informa sempre; reprova a partir do nivel
-        # configurado. Mantido como passo separado do build para que a falha
-        # seja legivel como problema de supply chain, nao de compilacao.
-        run: npm audit --audit-level=${{ inputs.npm-audit-level }}
+        # O npm nao possui allowlist nativa. A action compara os IDs retornados
+        # por npm audit --json com uma baseline versionada e reprova somente
+        # advisories novos no nivel configurado.
+        uses: veiculando/.github/.github/actions/npm-audit-baseline@main
+        with:
+          baseline: ${{ inputs.npm-audit-baseline }}
+          audit-level: ${{ inputs.npm-audit-level }}
