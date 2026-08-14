@@ -23,12 +23,16 @@ function loadJson(path) {
 
 function loadBaseline(path) {
   try {
-    return new Set(
-      readFileSync(path, 'utf8')
-        .split(/\r?\n/)
-        .map((line) => line.replace(/\s+#.*$/, '').trim())
-        .filter((line) => line && !line.startsWith('#')),
-    );
+    const entries = readFileSync(path, 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+#.*$/, '').trim())
+      .filter((line) => line && !line.startsWith('#'))
+      .map((id) =>
+        /^GHSA-/i.test(id)
+          ? id.toUpperCase()
+          : id,
+      );
+    return new Set(entries);
   } catch (error) {
     throw new Error(`Baseline npm ausente ou ilegivel em ${path}: ${error.message}`);
   }
