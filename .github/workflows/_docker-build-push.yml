@@ -1,0 +1,199 @@
+name: _docker-build-push
+
+# Build reproduzivel, scan antes do push e publicacao imutavel no ACR.
+# Nao usa GitHub Environment: funciona em repositorios privados no plano Free.
+# OIDC elimina senha de registry e credencial Azure de longa duracao.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Nome do repositorio da imagem dentro do ACR.
+        type: string
+        required: true
+      source-dir:
+        description: Diretorio do checkout do caller dentro de source/.
+        type: string
+        required: true
+      dockerfile:
+        description: Dockerfile relativo ao checkout do caller.
+        type: string
+        default: Dockerfile
+      needs-core:
+        description: Inclui o core como repositorio irmao no contexto Docker.
+        type: boolean
+        default: false
+      core-repo:
+        description: Repositorio do core.
+        type: string
+        default: veiculando/Veiculando
+      core-dir:
+        description: Nome exato do diretorio irmao esperado pelo Dockerfile.
+        type: string
+        default: Veiculando
+      core-ref-file:
+        description: Arquivo com SHA imutavel do core, relativo ao caller.
+        type: string
+        default: core.ref
+      acr-login-server:
+        description: Login server do ACR, por exemplo meuacr.azurecr.io.
+        type: string
+        required: true
+      trivy-ignore-file:
+        description: Baseline Trivy relativa ao checkout do caller.
+        type: string
+        default: .trivyignore
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+      core-repo-token:
+        required: false
+    outputs:
+      image-ref:
+        description: Referencia imutavel publicada no ACR.
+        value: ${{ jobs.build-scan-push.outputs.image-ref }}
+      image-digest:
+        description: Digest sha256 publicado.
+        value: ${{ jobs.build-scan-push.outputs.image-digest }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-ref: ${{ steps.publish.outputs.image-ref }}
+      image-digest: ${{ steps.publish.outputs.image-digest }}
+    steps:
+      - name: Validar entradas
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          SOURCE_DIR: ${{ inputs.source-dir }}
+          ACR_LOGIN_SERVER: ${{ inputs.acr-login-server }}
+          CORE_TOKEN: ${{ secrets.core-repo-token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$IMAGE_NAME" | grep -Eq '^[a-z0-9][a-z0-9._-]*$' || {
+            echo "::error::image-name invalido: $IMAGE_NAME"
+            exit 1
+          }
+          printf '%s' "$SOURCE_DIR" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || {
+            echo "::error::source-dir invalido: $SOURCE_DIR"
+            exit 1
+          }
+          printf '%s' "$ACR_LOGIN_SERVER" | grep -Eq '^[a-z0-9][a-z0-9.-]*\.azurecr\.io$' || {
+            echo "::error::acr-login-server invalido: $ACR_LOGIN_SERVER"
+            exit 1
+          }
+          if [ "${{ inputs.needs-core }}" = "true" ] && [ -z "$CORE_TOKEN" ]; then
+            echo "::error::core-repo-token e obrigatorio quando needs-core=true."
+            exit 1
+          fi
+
+      - name: Checkout do repositorio chamador
+        uses: actions/checkout@v4
+        with:
+          path: source/${{ inputs.source-dir }}
+
+      - name: Resolver ref fixada do core
+        if: inputs.needs-core
+        id: coreref
+        env:
+          REF_FILE: source/${{ inputs.source-dir }}/${{ inputs.core-ref-file }}
+        run: |
+          set -euo pipefail
+          test -f "$REF_FILE" || { echo "::error::Pin do core ausente: $REF_FILE"; exit 1; }
+          SHA="$(grep -v '^[[:space:]]*#' "$REF_FILE" | grep -v '^[[:space:]]*$' | head -n1 | tr -d '[:space:]')"
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "::error::Pin do core deve ser SHA completo."
+            exit 1
+          }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout do core fixado
+        if: inputs.needs-core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.core-repo }}
+          ref: ${{ steps.coreref.outputs.sha }}
+          token: ${{ secrets.core-repo-token }}
+          path: source/${{ inputs.core-dir }}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local para auditoria
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.needs-core && 'source' || format('source/{0}', inputs.source-dir) }}
+          file: ${{ inputs.needs-core && format('source/{0}/{1}', inputs.source-dir, inputs.dockerfile) || format('source/{0}/{1}', inputs.source-dir, inputs.dockerfile) }}
+          load: true
+          push: false
+          tags: local/${{ inputs.image-name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ inputs.image-name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image-name }}
+
+      - name: Scan High/Critical contra baseline observada
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: local/${{ inputs.image-name }}:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          trivyignores: source/${{ inputs.source-dir }}/${{ inputs.trivy-ignore-file }}
+          version: v0.74.0
+
+      - name: Gerar SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: local/${{ inputs.image-name }}:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-${{ inputs.image-name }}.spdx.json
+          upload-artifact: false
+
+      - name: Publicar SBOM como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ inputs.image-name }}-${{ github.sha }}
+          path: sbom-${{ inputs.image-name }}.spdx.json
+          retention-days: 30
+
+      - name: Login Azure por OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Publicar tag imutavel no ACR
+        id: publish
+        env:
+          ACR_LOGIN_SERVER: ${{ inputs.acr-login-server }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          LOCAL_IMAGE: local/${{ inputs.image-name }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          TARGET="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          az acr login --name "$ACR_NAME"
+          docker tag "$LOCAL_IMAGE" "$TARGET"
+          docker push "$TARGET"
+          REPO_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$TARGET")"
+          echo "image-ref=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "image-digest=${REPO_DIGEST#*@}" >> "$GITHUB_OUTPUT"
+          echo "Publicado: $TARGET@${REPO_DIGEST#*@}"
+
+      - name: Encerrar sessoes
+        if: always()
+        env:
+          ACR_LOGIN_SERVER: ${{ inputs.acr-login-server }}
+        run: |
+          docker logout "$ACR_LOGIN_SERVER" >/dev/null 2>&1 || true
+          az logout >/dev/null 2>&1 || true
