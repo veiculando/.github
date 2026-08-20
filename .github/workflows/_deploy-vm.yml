@@ -198,7 +198,9 @@ jobs:
           write_dotenv GITHUB_PAT_INTEGRACAO "$GITHUB_PAT_INTEGRACAO"
 
           chmod 600 "$ENV_FILE"
-          echo "env-b64=$(base64 -w0 "$ENV_FILE")" >> "$GITHUB_OUTPUT"
+          ENV_B64="$(base64 -w0 "$ENV_FILE")"
+          echo "::add-mask::$ENV_B64"
+          echo "env-b64=$ENV_B64" >> "$GITHUB_OUTPUT"
 
       - name: Executar deploy ou rollback na VM
         env:
