@@ -23,19 +23,19 @@ on:
         default: /opt/veiculando
       deploy-bundle-image:
         type: string
-        required: true
+        default: ''
       core-api-image:
         type: string
-        required: true
+        default: ''
       bff-image:
         type: string
-        required: true
+        default: ''
       app-image:
         type: string
-        required: true
+        default: ''
       exibidora-image:
         type: string
-        required: true
+        default: ''
       app-hosts:
         type: string
         required: true
@@ -121,16 +121,18 @@ jobs:
           printf '%s' "$APP_HOSTS" | grep -Eq '^[A-Za-z0-9.* -]+$'
           printf '%s' "$EXIBIDORA_HOSTS" | grep -Eq '^[A-Za-z0-9.* -]+$'
 
-          for image in "$DEPLOY_BUNDLE_IMAGE" "$CORE_API_IMAGE" "$BFF_IMAGE" "$APP_IMAGE" "$EXIBIDORA_IMAGE"; do
-            printf '%s' "$image" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/[a-z0-9._-]+:sha-[0-9a-f]{40}$' || {
-              echo "::error::Referencia nao imutavel ou fora do ACR esperado: $image"
-              exit 1
-            }
-            case "$image" in
-              "$ACR_LOGIN_SERVER"/*) ;;
-              *) echo "::error::Imagem fora do ACR configurado: $image"; exit 1 ;;
-            esac
-          done
+          if [ -z "$ROLLBACK_RELEASE" ]; then
+            for image in "$DEPLOY_BUNDLE_IMAGE" "$CORE_API_IMAGE" "$BFF_IMAGE" "$APP_IMAGE" "$EXIBIDORA_IMAGE"; do
+              printf '%s' "$image" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/[a-z0-9._-]+:sha-[0-9a-f]{40}$' || {
+                echo "::error::Referencia nao imutavel ou fora do ACR esperado: $image"
+                exit 1
+              }
+              case "$image" in
+                "$ACR_LOGIN_SERVER"/*) ;;
+                *) echo "::error::Imagem fora do ACR configurado: $image"; exit 1 ;;
+              esac
+            done
+          fi
 
           if [ -n "$ROLLBACK_RELEASE" ]; then
             printf '%s' "$ROLLBACK_RELEASE" | grep -Eq '^[A-Za-z0-9._-]+$' || {
