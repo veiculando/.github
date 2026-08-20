@@ -148,8 +148,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Preparar ambiente cifrado em transito
-        id: payload
+      - name: Preparar arquivo de ambiente temporario
         if: inputs.rollback-release == ''
         env:
           CORE_API_IMAGE: ${{ inputs.core-api-image }}
@@ -198,9 +197,6 @@ jobs:
           write_dotenv GITHUB_PAT_INTEGRACAO "$GITHUB_PAT_INTEGRACAO"
 
           chmod 600 "$ENV_FILE"
-          ENV_B64="$(base64 -w0 "$ENV_FILE")"
-          echo "::add-mask::$ENV_B64"
-          echo "env-b64=$ENV_B64" >> "$GITHUB_OUTPUT"
 
       - name: Executar deploy ou rollback na VM
         env:
@@ -213,11 +209,15 @@ jobs:
           APP_HOST: ${{ inputs.app-hosts }}
           EXIBIDORA_HOST: ${{ inputs.exibidora-hosts }}
           ROLLBACK_RELEASE: ${{ inputs.rollback-release }}
-          ENV_B64: ${{ steps.payload.outputs.env-b64 }}
         run: |
           set -euo pipefail
           RELEASE_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           REMOTE="$RUNNER_TEMP/remote-deploy.sh"
+          ENV_B64=''
+          if [ -z "$ROLLBACK_RELEASE" ]; then
+            ENV_B64="$(base64 -w0 "$RUNNER_TEMP/production.env")"
+            echo "::add-mask::$ENV_B64"
+          fi
 
           cat > "$REMOTE" <<EOF
           set -eu
