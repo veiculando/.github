@@ -174,10 +174,10 @@ jobs:
           write_dotenv() {
             key="$1"
             value="$2"
-            case "$value" in
-              *'
-'*) echo "::error::$key contem quebra de linha, formato nao suportado."; exit 1 ;;
-            esac
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "::error::$key contem quebra de linha, formato nao suportado."
+              exit 1
+            fi
             escaped="$(printf '%s' "$value" | sed "s/'/\\\\'/g")"
             printf "%s='%s'\n" "$key" "$escaped" >> "$ENV_FILE"
           }
