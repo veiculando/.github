@@ -231,6 +231,41 @@ class TestDeployNaoResolveTagMovel:
         assert "sha256:" in texto(DEPLOY)
 
 
+class TestOEnvFileDaMigracaoEParametro:
+    """BDD: o gate de migracao nao pode fixar o nome do arquivo de ambiente.
+
+    O passo lia `--env-file .env`. Medido na VM em 10/09/2026, o diretorio do
+    stack de producao tem `stack.env` e NAO tem `.env` - o gate falharia na
+    primeira execucao, e a falha diria "no such file", nao "migracao reprovou".
+
+    O nome do arquivo e propriedade de quem opera a VM, nao deste workflow.
+    """
+
+    def test_o_env_file_e_uma_entrada_declarada(self):
+        assert "env-file" in entradas(carregar(DEPLOY)), (
+            "o nome do arquivo de ambiente tem que vir de quem chama"
+        )
+
+    def test_nao_ha_env_file_fixo_no_corpo(self):
+        assert "--env-file .env " not in texto(DEPLOY), (
+            "`.env` fixo no corpo: o stack de producao usa `stack.env`"
+        )
+
+    def test_o_gate_usa_a_entrada(self):
+        corpo = texto(DEPLOY)
+        assert "inputs.env-file" in corpo, (
+            "a entrada foi declarada mas o gate continua ignorando-a"
+        )
+
+    def test_o_gate_reprova_cedo_se_o_env_file_faltar(self):
+        """Sem a guarda, o erro vira `no such file` vindo de dentro do
+        container - indistinguivel de uma migracao quebrada de verdade."""
+        corpo = texto(DEPLOY)
+        assert 'if [ -z "${ENVFILE:-}" ]; then' in corpo, (
+            "a guarda que reprova antes de tocar a VM sumiu"
+        )
+
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 
