@@ -1,0 +1,212 @@
+name: _docker-build-push
+
+# Constroi e publica uma imagem no ACR, ou promove uma imagem ja publicada.
+#
+# Por que existe: producao roda hoje imagens com tag sequencial (`homolog-api:gh-20`)
+# vindas de um registry pessoal. Nao ha como responder "de qual commit veio este
+# container?" nem fazer rollback dirigido. Este workflow separa build de release:
+#
+#   push na main   -> publica  <img>:sha-<commit-completo>
+#   tag git v1.4.2 -> RE-ETIQUETA o mesmo digest como :1.4.2 e :latest
+#
+# A promocao nao reconstroi. Reconstruir a partir do mesmo fonte nao garante o
+# mesmo binario - o cache do base image muda, o apt muda - e a imagem que passou
+# na homologacao deixaria de ser a imagem promovida. `az acr import` copia
+# server-side, sem pull e sem push, e o digest permanece identico.
+#
+# Autenticacao por OIDC: nao ha segredo de longa duracao no repositorio chamador.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Nome do repositorio da imagem dentro do ACR (ex.- api).
+        type: string
+        required: true
+      source-dir:
+        description: >-
+          Diretorio em que o repositorio chamador e clonado, e que serve de
+          contexto de build. Mesma convencao do `_dotnet-ci.yml` (`app-dir`).
+        type: string
+        default: '.'
+      dockerfile:
+        description: Caminho do Dockerfile, relativo a raiz do repositorio.
+        type: string
+        required: true
+      acr-login-server:
+        description: Login server do ACR (ex.- veiculandoacr.azurecr.io).
+        type: string
+        required: true
+      promote-from-digest:
+        description: >-
+          Quando preenchido, o build e PULADO e o digest informado recebe as
+          tags de `promote-tags`. Formato sha256:<64 hex>.
+        type: string
+        default: ''
+      promote-tags:
+        description: Tags a aplicar na promocao, separadas por virgula.
+        type: string
+        default: ''
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+    outputs:
+      digest:
+        description: Digest da imagem publicada ou promovida.
+        value: ${{ jobs.build-push.outputs.digest }}
+      image-ref:
+        description: Referencia completa e imutavel, pronta para o deploy.
+        value: ${{ jobs.build-push.outputs.image-ref }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.resolver.outputs.digest }}
+      image-ref: ${{ steps.resolver.outputs.image-ref }}
+    steps:
+      - name: Validar parametros de promocao
+        env:
+          DIGEST: ${{ inputs.promote-from-digest }}
+          TAGS: ${{ inputs.promote-tags }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            if [ -n "$TAGS" ]; then
+              echo "::error::promote-tags exige promote-from-digest."
+              exit 1
+            fi
+            echo "Modo build."
+            exit 0
+          fi
+          # Um digest malformado so falharia dentro do `az acr import`, com uma
+          # mensagem do registry. Reprovar aqui deixa o erro legivel.
+          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Digest invalido: $DIGEST (esperado sha256:<64 hex>)"
+            exit 1
+          fi
+          if [ -z "$TAGS" ]; then
+            echo "::error::Promocao sem promote-tags nao produz efeito."
+            exit 1
+          fi
+          echo "Modo promocao."
+
+      - name: Checkout
+        if: inputs.promote-from-digest == ''
+        uses: actions/checkout@v4
+        with:
+          # Mesma convencao do `_dotnet-ci.yml`: o chamador nomeia o diretorio.
+          path: ${{ inputs.source-dir }}
+
+      - name: Login no Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Derivar o nome do ACR
+        id: acr
+        env:
+          SERVER: ${{ inputs.acr-login-server }}
+        run: |
+          set -euo pipefail
+          echo "name=${SERVER%%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Login no ACR
+        run: az acr login -n '${{ steps.acr.outputs.name }}'
+
+      - name: Setup Buildx
+        if: inputs.promote-from-digest == ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build e push
+        id: build
+        if: inputs.promote-from-digest == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.source-dir }}
+          # `file` e relativo ao workspace, nao ao contexto: sem o prefixo, um
+          # chamador que clone em subdiretorio nao acha o proprio Dockerfile.
+          file: ${{ inputs.source-dir }}/${{ inputs.dockerfile }}
+          push: true
+          # SHA completo, nunca abreviado: 7 caracteres colidem, e uma tag que
+          # colide manda a imagem errada para producao sem erro nenhum.
+          tags: ${{ inputs.acr-login-server }}/${{ inputs.image-name }}:sha-${{ github.sha }}
+          # Sem attestation: ela transforma o push num manifest list, e o digest
+          # que o deploy fixa deixa de ser o da imagem.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ inputs.image-name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image-name }}
+
+      - name: Promover digest existente
+        id: promocao
+        if: inputs.promote-from-digest != ''
+        env:
+          ACR: ${{ steps.acr.outputs.name }}
+          IMAGE: ${{ inputs.image-name }}
+          DIGEST: ${{ inputs.promote-from-digest }}
+          TAGS: ${{ inputs.promote-tags }}
+        run: |
+          set -euo pipefail
+          # --force porque `latest` e, por definicao, reescrita a cada release.
+          # As tags semanticas nunca colidem; se colidirem, e sinal de tag git
+          # reaproveitada e o problema esta antes daqui.
+          printf '%s' "$TAGS" | tr ',' '\n' | while read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Aplicando $tag em $IMAGE@$DIGEST"
+            az acr import -n "$ACR" \
+              --source "$IMAGE@$DIGEST" \
+              -t "$IMAGE:$tag" \
+              --force
+          done
+
+      - name: Resolver a referencia publicada
+        id: resolver
+        env:
+          SERVER: ${{ inputs.acr-login-server }}
+          IMAGE: ${{ inputs.image-name }}
+          DIGEST_BUILD: ${{ steps.build.outputs.digest }}
+          DIGEST_PROMO: ${{ inputs.promote-from-digest }}
+        run: |
+          set -euo pipefail
+          digest="${DIGEST_PROMO:-$DIGEST_BUILD}"
+          if [ -z "$digest" ]; then
+            echo "::error::Nenhum digest resolvido - build e promocao falharam."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image-ref=$SERVER/$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "Publicado: $SERVER/$IMAGE@$digest"
+
+          # O log de um passo expira; o resumo da execucao fica. Rollback e
+          # redeployar um digest conhecido, e para isso alguem precisa
+          # conseguir achar o digest meses depois.
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "| campo | valor |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA}\` |"
+            echo "| digest | \`${digest}\` |"
+            echo "| referencia | \`${SERVER}/${IMAGE}@${digest}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Conferir que o digest e alcancavel
+        env:
+          REF: ${{ steps.resolver.outputs.image-ref }}
+        run: |
+          set -euo pipefail
+          # Se o deploy fosse a primeira coisa a tentar resolver este digest, a
+          # falha apareceria com producao ja parada.
+          docker manifest inspect "$REF" > /dev/null
+          echo "Digest confirmado no registry."

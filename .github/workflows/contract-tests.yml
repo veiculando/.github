@@ -1,0 +1,42 @@
+name: contract-tests
+
+# Roda os testes de contrato dos workflows reutilizaveis.
+#
+# Por que num repositorio que nao tem codigo de aplicacao: os workflows daqui
+# sao consumidos por outros repositorios via
+# `uses: veiculando/.github/.github/workflows/X@main`. Um erro introduzido aqui
+# nao quebra este repositorio - quebra o pipeline de quem chama, e quase sempre
+# no pior momento, que e durante um deploy. Este job move a descoberta para a PR.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'tests/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contrato:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install --disable-pip-version-check pytest pyyaml
+
+      - name: Testes de contrato
+        run: python -m pytest tests/ -v
