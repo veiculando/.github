@@ -50,6 +50,16 @@ on:
         description: Diretorio na VM que contem o compose do stack.
         type: string
         required: true
+      image-ref-var:
+        description: >-
+          Nome da variavel que o compose da VM interpola para este servico.
+          O stack de producao usa uma por servico (`API_IMAGE_REF`,
+          `FS_IMAGE_REF`) porque tem dois servicos: com nome compartilhado, um
+          deploy da API renderizaria o FileServer com a referencia da API.
+          Errar aqui NAO falha: o compose cai no default e a run fica verde
+          tendo implantado a imagem antiga.
+        type: string
+        default: IMAGE_REF
       compose-service:
         description: Servico dentro do compose correspondente ao container.
         type: string
@@ -217,15 +227,23 @@ jobs:
           REF: ${{ inputs.acr-login-server }}/${{ inputs.image-name }}@${{ inputs.image-digest }}
           DIR: ${{ inputs.compose-dir }}
           SERVICO: ${{ inputs.compose-service }}
+          VARIAVEL: ${{ inputs.image-ref-var }}
           URL: ${{ inputs.health-url }}
           TENTATIVAS: ${{ inputs.health-retries }}
           INTERVALO: ${{ inputs.health-interval }}
         run: |
           set -euo pipefail
-          # IMAGE_REF e a unica coisa que o compose interpola: o arquivo na VM
-          # nao carrega referencia de imagem propria, para que nao exista um
-          # segundo lugar de onde uma tag movel possa reentrar.
-          roteiro="set -e; cd '${DIR}'; export IMAGE_REF='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
+          # O nome da variavel entra numa string de shell montada aqui, entao
+          # precisa ser validado antes: um valor como `X; curl evil` viraria
+          # comando rodando como root na VM.
+          if ! printf '%s' "$VARIAVEL" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+            echo "::error::image-ref-var invalido: $VARIAVEL"
+            exit 1
+          fi
+          # A variavel e a UNICA coisa que o compose interpola para este
+          # servico: o arquivo na VM nao carrega referencia de imagem propria,
+          # para que nao exista um segundo lugar de onde uma tag movel reentre.
+          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
           saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
             --command-id RunShellScript \
             --scripts "$roteiro" \
@@ -241,10 +259,11 @@ jobs:
           ANTERIOR: ${{ steps.anterior.outputs.digest }}
           DIR: ${{ inputs.compose-dir }}
           SERVICO: ${{ inputs.compose-service }}
+          VARIAVEL: ${{ inputs.image-ref-var }}
         run: |
           set -euo pipefail
           echo "::warning::Health reprovou. Voltando para ${ANTERIOR}"
-          roteiro="set -e; cd '${DIR}'; export IMAGE_REF='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'"
+          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'"
           az vm run-command invoke -g "$RG" -n "$VM" \
             --command-id RunShellScript \
             --scripts "$roteiro" \

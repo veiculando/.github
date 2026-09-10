@@ -266,6 +266,45 @@ class TestOEnvFileDaMigracaoEParametro:
         )
 
 
+class TestAVariavelDeImagemEParametro:
+    """BDD: o nome da variavel que o compose interpola vem de quem chama.
+
+    O compose de producao usa uma variavel POR SERVICO (`API_IMAGE_REF`,
+    `FS_IMAGE_REF`) porque o stack tem dois servicos e um nome compartilhado
+    faria um deploy renderizar o outro servico errado.
+
+    Com `export IMAGE_REF` fixo aqui, o deploy exportaria uma variavel que o
+    compose IGNORA: o servico cairia no default e a run ficaria VERDE tendo
+    implantado a imagem antiga - o health passa, porque a imagem antiga e
+    saudavel. Falha silenciosa, da mesma familia da tag `latest` perdida.
+    """
+
+    def test_o_nome_da_variavel_e_uma_entrada(self):
+        assert "image-ref-var" in entradas(carregar(DEPLOY)), (
+            "o nome da variavel do compose tem que vir de quem chama"
+        )
+
+    def test_nao_ha_nome_de_variavel_fixo(self):
+        assert "export IMAGE_REF=" not in texto(DEPLOY), (
+            "IMAGE_REF fixo: o compose de producao le API_IMAGE_REF/FS_IMAGE_REF"
+        )
+
+    def test_a_troca_e_o_rollback_usam_a_mesma_entrada(self):
+        """Rollback exportando outra variavel deixaria producao na imagem que
+        acabou de reprovar no health."""
+        corpo = texto(DEPLOY)
+        assert corpo.count("export ${VARIAVEL}=") == 2, (
+            "troca e rollback devem exportar a variavel parametrizada"
+        )
+
+    def test_o_nome_da_variavel_e_validado(self):
+        """O nome entra numa string de shell montada aqui: sem validacao, um
+        valor como `X; curl evil` viraria comando na VM."""
+        assert "A-Za-z_" in texto(DEPLOY), (
+            "falta validar o formato do nome da variavel antes de interpolar"
+        )
+
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 
