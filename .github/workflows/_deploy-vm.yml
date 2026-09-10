@@ -70,6 +70,18 @@ on:
         description: Executa o gate de migracao antes da troca.
         type: boolean
         default: false
+      env-file:
+        description: >-
+          Arquivo de ambiente, relativo a `compose-dir`, que o gate de migracao
+          passa ao container descartavel. Exigido quando `run-migrations` e
+          verdadeiro; ignorado caso contrario.
+          Nao pode ser `required` nem ter default: o GitHub valida inputs
+          obrigatorios no startup, antes de qualquer `if`, e um deploy sem
+          migracao nem iniciaria. Um default tambem nao serve - era exatamente
+          o `.env` fixo que este parametro corrige, e um default errado falha
+          igual, so que mais tarde.
+        type: string
+        default: ''
       migration-command:
         description: Comando de migracao executado dentro da imagem nova.
         type: string
@@ -173,12 +185,20 @@ jobs:
           REF: ${{ inputs.acr-login-server }}/${{ inputs.image-name }}@${{ inputs.image-digest }}
           COMANDO: ${{ inputs.migration-command }}
           DIR: ${{ inputs.compose-dir }}
+          ENVFILE: ${{ inputs.env-file }}
         run: |
           set -euo pipefail
+          # `run-migrations` ligado sem `env-file` e erro de quem chama, e
+          # precisa reprovar ANTES de tocar a VM - nao virar um "no such file"
+          # vindo de dentro do container, que se parece com migracao quebrada.
+          if [ -z "${ENVFILE:-}" ]; then
+            echo "::error::run-migrations esta ligado mas env-file nao foi informado."
+            exit 1
+          fi
           # A migracao roda na imagem NOVA, num container descartavel, com o
           # mesmo env-file do stack. Se falhar, este passo falha e nenhum
           # container de producao foi tocado.
-          roteiro="set -e; cd '${DIR}'; docker run --rm --env-file .env --network host '${REF}' ${COMANDO}; echo MIGRACAO_OK"
+          roteiro="set -e; cd '${DIR}'; docker run --rm --env-file '${ENVFILE}' --network host '${REF}' ${COMANDO}; echo MIGRACAO_OK"
           saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
             --command-id RunShellScript \
             --scripts "$roteiro" \
