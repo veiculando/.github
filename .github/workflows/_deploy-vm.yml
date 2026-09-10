@@ -193,7 +193,11 @@ jobs:
             --command-id RunShellScript \
             --scripts "$roteiro" \
             --query "value[0].message" -o tsv)
-          anterior=$(printf '%s' "$saida" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 || true)
+          # A referencia COMPLETA (host/repo@digest), nao so o digest: o
+          # rollback exporta este valor como imagem no compose, e `sha256:...`
+          # sozinho nao e referencia valida. Foi assim que o rollback falhou
+          # em silencio no ensaio de 10/09/2026.
+          anterior=$(printf '%s' "$saida" | grep -oE '[A-Za-z0-9._:-]+(/[A-Za-z0-9._-]+)+@sha256:[0-9a-f]{64}' | head -1 || true)
           if [ -z "$anterior" ]; then
             echo "::warning::Nao foi possivel determinar o digest atual de ${CONTAINER}."
             echo "::warning::O rollback automatico fica indisponivel neste deploy."
@@ -287,16 +291,29 @@ jobs:
           ANTERIOR: ${{ steps.anterior.outputs.digest }}
           DIR: ${{ inputs.compose-dir }}
           SERVICO: ${{ inputs.compose-service }}
+          CONTAINER: ${{ inputs.container-name }}
           VARIAVEL: ${{ inputs.image-ref-var }}
         run: |
           set -euo pipefail
           echo "::warning::Health reprovou. Voltando para ${ANTERIOR}"
-          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'"
-          az vm run-command invoke -g "$RG" -n "$VM" \
+          # O roteiro CONFERE o resultado antes de declarar sucesso. Sem isso o
+          # passo mentia: `az vm run-command invoke` devolve exito quando a
+          # INVOCACAO funciona, mesmo que o script dentro da VM falhe. No ensaio
+          # de 10/09/2026 o rollback relatou sucesso e producao continuou na
+          # imagem que acabara de reprovar no health.
+          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'; atual=\$(docker inspect --format '{{.Config.Image}}' '${CONTAINER}'); if [ \"\$atual\" = '${ANTERIOR}' ]; then echo ROLLBACK_OK; else echo \"ROLLBACK_DIVERGENTE atual=\$atual\"; exit 1; fi"
+          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
             --command-id RunShellScript \
             --scripts "$roteiro" \
-            --query "value[0].message" -o tsv
-          echo "::error::Imagem revertida. O SCHEMA NAO foi revertido."
+            --query "value[0].message" -o tsv) || true
+          printf '%s\n' "$saida"
+          if printf '%s' "$saida" | grep -q ROLLBACK_OK; then
+            echo "::error::Health reprovou. Imagem revertida para ${ANTERIOR}. O SCHEMA NAO foi revertido."
+          else
+            echo "::error::ROLLBACK FALHOU. Producao pode estar na imagem que reprovou no health."
+            echo "::error::Intervencao manual: cd ${DIR} && export ${VARIAVEL}='${ANTERIOR}' && docker compose up -d --no-deps ${SERVICO}"
+            exit 1
+          fi
 
       - name: Encerrar a sessao do ACR na VM
         # `always()` de proposito: se o deploy falhou e o rollback rodou, a

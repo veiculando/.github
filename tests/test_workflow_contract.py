@@ -292,11 +292,18 @@ class TestAVariavelDeImagemEParametro:
     def test_a_troca_e_o_rollback_usam_a_mesma_entrada(self):
         """Rollback exportando outra variavel deixaria producao na imagem que
         acabou de reprovar no health."""
-        corpo = texto(DEPLOY)
-        assert corpo.count("export ${VARIAVEL}=") == 2, (
-            "troca e rollback devem exportar a variavel parametrizada"
+        # Conta so nas linhas que MONTAM roteiro para a VM. A mensagem de erro
+        # do rollback tambem cita `export ${VARIAVEL}=`, ensinando o comando de
+        # recuperacao manual - util para quem opera, e nao e um terceiro uso.
+        roteiros = [
+            l for l in texto(DEPLOY).splitlines()
+            if l.lstrip().startswith("roteiro=")
+        ]
+        com_variavel = [l for l in roteiros if "export ${VARIAVEL}=" in l]
+        assert len(com_variavel) == 2, (
+            "troca e rollback devem exportar a variavel parametrizada "
+            f"(encontrados {len(com_variavel)} roteiros)"
         )
-
     def test_o_nome_da_variavel_e_validado(self):
         """O nome entra numa string de shell montada aqui: sem validacao, um
         valor como `X; curl evil` viraria comando na VM."""
@@ -353,6 +360,62 @@ class TestAVmSeAutenticaNoAcr:
         assert util.index("oauth2/exchange") < util.index("docker compose pull"), (
             "autenticar depois do pull nao serve para nada"
         )
+
+class TestORollbackRestauraDeVerdade:
+    """BDD: o rollback tem que restaurar a imagem, e provar que restaurou.
+
+    Descoberto no ensaio de rollback de 10/09/2026. O passo relatou SUCESSO,
+    o log disse "Voltando para sha256:d79b27ad..." e "Imagem revertida", e a
+    producao continuou na imagem que acabara de reprovar no health.
+
+    Duas causas somadas:
+
+    1. A captura reduzia `RepoDigests[0]` a um digest cru. O que a VM tem em
+       RepoDigests e `host/repo@sha256:...`; o grep jogava fora o host e o
+       repo. O rollback exportava `FS_IMAGE_REF=sha256:...`, que nao e
+       referencia de imagem, e o `docker compose up` falhava dentro da VM.
+
+    2. O passo nao conferia nada. `az vm run-command invoke` devolve exito
+       quando a INVOCACAO funciona, mesmo que o script dentro da VM falhe -
+       por isso todo passo daqui procura uma sentinela na saida. O rollback
+       era o unico que nao procurava, e imprimia "Imagem revertida" sempre.
+
+    Um rollback que mente e pior que nao ter rollback: quem le o log acredita
+    que producao voltou.
+    """
+
+    def test_a_captura_preserva_a_referencia_completa(self):
+        corpo = texto(DEPLOY)
+        assert "@sha256:" in corpo, (
+            "a captura precisa manter host/repo@digest, nao so o digest"
+        )
+        assert "grep -oE 'sha256:[0-9a-f]{64}'" not in corpo, (
+            "este padrao descarta host e repo: o rollback fica sem referencia"
+        )
+
+    def test_o_rollback_confere_o_resultado(self):
+        assert "ROLLBACK_OK" in texto(DEPLOY), (
+            "o rollback nao verifica se a imagem voltou"
+        )
+
+    def test_toda_sentinela_e_procurada_na_saida(self):
+        """`az vm run-command invoke` devolve exito mesmo quando o script
+        dentro da VM falha. Sem procurar sentinela, o passo mente."""
+        corpo = texto(DEPLOY)
+        for sentinela in ("LOGIN_ACR_OK", "MIGRACAO_OK", "HEALTH_OK", "ROLLBACK_OK"):
+            assert corpo.count(sentinela) >= 2, (
+                f"{sentinela} e emitida mas nunca procurada na saida"
+            )
+
+    def test_nao_afirma_reversao_sem_confirmar(self):
+        util = "\n".join(
+            l for l in texto(DEPLOY).splitlines()
+            if not l.lstrip().startswith("#")
+        )
+        assert "::error::Imagem revertida. O SCHEMA NAO foi revertido." not in util, (
+            "afirmacao incondicional de que a imagem voltou"
+        )
+
 
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
