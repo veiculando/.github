@@ -24,7 +24,9 @@ on:
         type: string
         required: true
       source-dir:
-        description: Contexto de build passado ao docker.
+        description: >-
+          Diretorio em que o repositorio chamador e clonado, e que serve de
+          contexto de build. Mesma convencao do `_dotnet-ci.yml` (`app-dir`).
         type: string
         default: '.'
       dockerfile:
@@ -100,6 +102,9 @@ jobs:
       - name: Checkout
         if: inputs.promote-from-digest == ''
         uses: actions/checkout@v4
+        with:
+          # Mesma convencao do `_dotnet-ci.yml`: o chamador nomeia o diretorio.
+          path: ${{ inputs.source-dir }}
 
       - name: Login no Azure (OIDC)
         uses: azure/login@v2
@@ -129,7 +134,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.source-dir }}
-          file: ${{ inputs.dockerfile }}
+          # `file` e relativo ao workspace, nao ao contexto: sem o prefixo, um
+          # chamador que clone em subdiretorio nao acha o proprio Dockerfile.
+          file: ${{ inputs.source-dir }}/${{ inputs.dockerfile }}
           push: true
           # SHA completo, nunca abreviado: 7 caracteres colidem, e uma tag que
           # colide manda a imagem errada para producao sem erro nenhum.

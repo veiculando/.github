@@ -73,6 +73,18 @@ class TestBuildPublicaArtefatoRastreavel:
         """`id-token: write` e o que permite login sem segredo de longa duracao."""
         assert carregar(BUILD).get("permissions", {}).get("id-token") == "write"
 
+    def test_clona_e_constroi_no_diretorio_que_o_chamador_nomeia(self):
+        """Mesma convencao do `_dotnet-ci.yml`, que clona em `app-dir`.
+
+        O `docker.yml` do commit b3cfdde passa `source-dir: Veiculando` porque
+        e assim que os workflows desta organizacao ja funcionam. Se o checkout
+        cair na raiz e o `file` nao levar o prefixo, todo chamador que use a
+        convencao deixa de achar o proprio Dockerfile.
+        """
+        corpo = texto(BUILD)
+        assert "path: ${{ inputs.source-dir }}" in corpo
+        assert "file: ${{ inputs.source-dir }}/${{ inputs.dockerfile }}" in corpo
+
     def test_marca_a_imagem_com_o_sha_completo(self):
         corpo = texto(BUILD)
         assert "sha-${{ github.sha }}" in corpo, (
