@@ -188,6 +188,19 @@ jobs:
           echo "image-ref=$SERVER/$IMAGE@$digest" >> "$GITHUB_OUTPUT"
           echo "Publicado: $SERVER/$IMAGE@$digest"
 
+          # O log de um passo expira; o resumo da execucao fica. Rollback e
+          # redeployar um digest conhecido, e para isso alguem precisa
+          # conseguir achar o digest meses depois.
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "| campo | valor |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA}\` |"
+            echo "| digest | \`${digest}\` |"
+            echo "| referencia | \`${SERVER}/${IMAGE}@${digest}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Conferir que o digest e alcancavel
         env:
           REF: ${{ steps.resolver.outputs.image-ref }}

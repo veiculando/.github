@@ -94,6 +94,16 @@ class TestBuildPublicaArtefatoRastreavel:
         )
 
 
+    def test_registra_o_digest_no_resumo_da_execucao(self):
+        """O digest tem que sobreviver ao log, que expira.
+
+        Rollback e redeployar um digest conhecido. Se o unico registro do
+        digest for a saida de um passo, dali a algumas semanas a resposta para
+        "para onde eu volto?" volta a ser a mesma de hoje: ninguem sabe.
+        """
+        assert "GITHUB_STEP_SUMMARY" in texto(BUILD)
+
+
 class TestPromocaoNaoRefaz_Build:
     """BDD: uma tag git republica a MESMA imagem, sem reconstruir.
 
