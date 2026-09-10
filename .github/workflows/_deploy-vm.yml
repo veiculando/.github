@@ -1,0 +1,232 @@
+name: _deploy-vm
+
+# Troca um servico da VM por uma imagem identificada por DIGEST, com gate de
+# migracao antes e rollback automatico depois.
+#
+# Duas regras governam este workflow:
+#
+# 1. So se aceita digest. Nao ha entrada de tag. Producao roda hoje tags moveis
+#    (`homolog-api:gh-20`) e ninguem consegue dizer de qual commit vieram; uma
+#    tag tambem pode ser reescrita entre a homologacao e o deploy, e ai o que
+#    sobe nao e o que foi aprovado. Digest e imutavel por construcao.
+#
+# 2. A migracao roda ANTES da troca e reprova a troca se falhar. O deploy que
+#    existia antes deste workflow ia direto de `pull` para `up`: uma migracao
+#    quebrada seria descoberta pelo usuario, com a imagem nova ja no ar. Falhar
+#    aqui deixa producao intacta na versao anterior.
+#
+# O snapshot do banco (`az sql db copy`) e o unico rollback possivel para dados.
+# Rollback de imagem NAO desfaz migracao - por isso migrations retrocompativeis
+# sao regra, e quando nao puderem ser, viram duas entregas.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Nome do repositorio da imagem dentro do ACR.
+        type: string
+        required: true
+      image-digest:
+        description: Digest imutavel a implantar. Formato sha256 seguido de 64 hex.
+        type: string
+        required: true
+      acr-login-server:
+        description: Login server do ACR.
+        type: string
+        required: true
+      vm-name:
+        description: Nome da VM alvo.
+        type: string
+        required: true
+      resource-group:
+        description: Resource group da VM.
+        type: string
+        required: true
+      container-name:
+        description: Nome do container a substituir na VM.
+        type: string
+        required: true
+      compose-dir:
+        description: Diretorio na VM que contem o compose do stack.
+        type: string
+        required: true
+      compose-service:
+        description: Servico dentro do compose correspondente ao container.
+        type: string
+        required: true
+      health-url:
+        description: URL consultada de dentro da VM para aprovar a troca.
+        type: string
+        required: true
+      health-retries:
+        description: Tentativas de health antes de declarar falha.
+        type: number
+        default: 24
+      health-interval:
+        description: Segundos entre tentativas de health.
+        type: number
+        default: 5
+      run-migrations:
+        description: Executa o gate de migracao antes da troca.
+        type: boolean
+        default: false
+      migration-command:
+        description: Comando de migracao executado dentro da imagem nova.
+        type: string
+        default: ''
+      sql-server:
+        description: Servidor SQL logico, para o snapshot pre-migracao.
+        type: string
+        default: ''
+      sql-database:
+        description: Banco a copiar antes da migracao.
+        type: string
+        default: ''
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+    outputs:
+      previous-digest:
+        description: Digest que estava no ar antes da troca.
+        value: ${{ jobs.deploy.outputs.previous-digest }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      previous-digest: ${{ steps.anterior.outputs.digest }}
+    steps:
+      - name: Validar o digest
+        env:
+          DIGEST: ${{ inputs.image-digest }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Digest invalido: $DIGEST"
+            echo "Producao NAO foi tocada."
+            exit 1
+          fi
+
+      - name: Exigir comando de migracao quando o gate esta ligado
+        if: inputs.run-migrations && inputs.migration-command == ''
+        run: |
+          echo "::error::run-migrations exige migration-command."
+          exit 1
+
+      - name: Login no Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Registrar o digest atual
+        id: anterior
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          CONTAINER: ${{ inputs.container-name }}
+        run: |
+          set -euo pipefail
+          # RepoDigests, e nao .Image: o Image ID e local a VM e nao serve para
+          # repuxar a imagem anterior num rollback.
+          roteiro="docker inspect --format '{{index .RepoDigests 0}}' \$(docker inspect --format '{{.Image}}' ${CONTAINER}) || echo DESCONHECIDO"
+          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "$roteiro" \
+            --query "value[0].message" -o tsv)
+          anterior=$(printf '%s' "$saida" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 || true)
+          if [ -z "$anterior" ]; then
+            echo "::warning::Nao foi possivel determinar o digest atual de ${CONTAINER}."
+            echo "::warning::O rollback automatico fica indisponivel neste deploy."
+            anterior="DESCONHECIDO"
+          fi
+          echo "digest=$anterior" >> "$GITHUB_OUTPUT"
+          echo "Em producao agora: $anterior"
+
+      - name: Snapshot do banco antes da migracao
+        if: inputs.run-migrations && inputs.sql-database != ''
+        env:
+          RG: ${{ inputs.resource-group }}
+          SERVIDOR: ${{ inputs.sql-server }}
+          BANCO: ${{ inputs.sql-database }}
+        run: |
+          set -euo pipefail
+          copia="${BANCO}-predeploy-$(date -u +%Y%m%d%H%M%S)"
+          echo "Copiando ${BANCO} para ${copia}"
+          az sql db copy -g "$RG" -s "$SERVIDOR" -n "$BANCO" --dest-name "$copia"
+          echo "::notice::Snapshot ${copia}. Rollback de imagem nao desfaz migracao."
+
+      - name: Gate de migracao
+        if: inputs.run-migrations
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          REF: ${{ inputs.acr-login-server }}/${{ inputs.image-name }}@${{ inputs.image-digest }}
+          COMANDO: ${{ inputs.migration-command }}
+          DIR: ${{ inputs.compose-dir }}
+        run: |
+          set -euo pipefail
+          # A migracao roda na imagem NOVA, num container descartavel, com o
+          # mesmo env-file do stack. Se falhar, este passo falha e nenhum
+          # container de producao foi tocado.
+          roteiro="set -e; cd '${DIR}'; docker run --rm --env-file .env --network host '${REF}' ${COMANDO}; echo MIGRACAO_OK"
+          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "$roteiro" \
+            --query "value[0].message" -o tsv)
+          printf '%s\n' "$saida"
+          if ! printf '%s' "$saida" | grep -q MIGRACAO_OK; then
+            echo "::error::Migracao falhou. Troca abortada, producao intacta."
+            exit 1
+          fi
+
+      - name: Trocar o container e conferir saude
+        id: troca
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          REF: ${{ inputs.acr-login-server }}/${{ inputs.image-name }}@${{ inputs.image-digest }}
+          DIR: ${{ inputs.compose-dir }}
+          SERVICO: ${{ inputs.compose-service }}
+          URL: ${{ inputs.health-url }}
+          TENTATIVAS: ${{ inputs.health-retries }}
+          INTERVALO: ${{ inputs.health-interval }}
+        run: |
+          set -euo pipefail
+          # IMAGE_REF e a unica coisa que o compose interpola: o arquivo na VM
+          # nao carrega referencia de imagem propria, para que nao exista um
+          # segundo lugar de onde uma tag movel possa reentrar.
+          roteiro="set -e; cd '${DIR}'; export IMAGE_REF='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
+          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "$roteiro" \
+            --query "value[0].message" -o tsv)
+          printf '%s\n' "$saida"
+          printf '%s' "$saida" | grep -q HEALTH_OK
+
+      - name: Rollback para o digest anterior
+        if: failure() && steps.troca.outcome == 'failure' && steps.anterior.outputs.digest != 'DESCONHECIDO'
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          ANTERIOR: ${{ steps.anterior.outputs.digest }}
+          DIR: ${{ inputs.compose-dir }}
+          SERVICO: ${{ inputs.compose-service }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Health reprovou. Voltando para ${ANTERIOR}"
+          roteiro="set -e; cd '${DIR}'; export IMAGE_REF='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'"
+          az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "$roteiro" \
+            --query "value[0].message" -o tsv
+          echo "::error::Imagem revertida. O SCHEMA NAO foi revertido."
