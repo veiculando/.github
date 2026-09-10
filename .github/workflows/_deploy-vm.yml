@@ -150,6 +150,34 @@ jobs:
           tenant-id: ${{ secrets.azure-tenant-id }}
           subscription-id: ${{ secrets.azure-subscription-id }}
 
+      - name: Autenticar a VM no ACR pela identidade gerenciada
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          SERVER: ${{ inputs.acr-login-server }}
+        run: |
+          set -euo pipefail
+          # A VM tem AcrPull por RBAC, mas o daemon do docker nao fala RBAC:
+          # precisa de `docker login`. Sem este passo o `docker compose pull`
+          # abaixo so funciona quando a imagem JA esta em cache local - e a
+          # run fica verde escondendo que o pull nunca aconteceu. Foi assim
+          # que este defeito apareceu, exercitando o deploy de verdade.
+          #
+          # O token sai do IMDS e e trocado no proprio ACR. Nao ha segredo no
+          # workflow nem no script que o run-command grava em disco na VM:
+          # tudo e obtido em tempo de execucao, dentro da maquina.
+          roteiro="set -e; T=\$(curl -s -H Metadata:true 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"access_token\"])'); R=\$(curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d \"grant_type=access_token&service=${SERVER}&access_token=\$T\" 'https://${SERVER}/oauth2/exchange' | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"refresh_token\"])'); printf '%s' \"\$R\" | docker login '${SERVER}' -u 00000000-0000-0000-0000-000000000000 --password-stdin > /dev/null; echo LOGIN_ACR_OK"
+          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "$roteiro" \
+            --query "value[0].message" -o tsv)
+          if ! printf '%s' "$saida" | grep -q LOGIN_ACR_OK; then
+            echo "::error::A VM nao conseguiu autenticar no ACR. Confira AcrPull na identidade da VM."
+            printf '%s\n' "$saida"
+            exit 1
+          fi
+          echo "VM autenticada em ${SERVER}"
+
       - name: Registrar o digest atual
         id: anterior
         env:
@@ -269,3 +297,20 @@ jobs:
             --scripts "$roteiro" \
             --query "value[0].message" -o tsv
           echo "::error::Imagem revertida. O SCHEMA NAO foi revertido."
+
+      - name: Encerrar a sessao do ACR na VM
+        # `always()` de proposito: se o deploy falhou e o rollback rodou, a
+        # credencial precisa sair do mesmo jeito. `docker login` a grava em
+        # /root/.docker/config.json, e deixa-la la e credencial persistente
+        # numa maquina onde o run-command ja roda como root.
+        if: always()
+        env:
+          RG: ${{ inputs.resource-group }}
+          VM: ${{ inputs.vm-name }}
+          SERVER: ${{ inputs.acr-login-server }}
+        run: |
+          set -euo pipefail
+          az vm run-command invoke -g "$RG" -n "$VM" \
+            --command-id RunShellScript \
+            --scripts "docker logout '${SERVER}' > /dev/null 2>&1; echo LOGOUT_OK" \
+            --query "value[0].message" -o tsv || true

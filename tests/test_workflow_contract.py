@@ -305,6 +305,55 @@ class TestAVariavelDeImagemEParametro:
         )
 
 
+class TestAVmSeAutenticaNoAcr:
+    """BDD: o deploy autentica o docker da VM no ACR antes de puxar.
+
+    Descoberto exercitando o deploy de verdade em 10/09/2026: a run ficou
+    VERDE e o compose imprimiu `app2 Pulling / Pulled`, mas a VM nao estava
+    autenticada. Funcionou so porque aquela imagem ja estava em cache local,
+    puxada a mao numa verificacao anterior.
+
+    Um `docker run` no mesmo ACR, num digest nao cacheado, devolvia
+    `unauthorized`. O primeiro deploy de uma imagem realmente nova - um
+    hotfix, tipicamente - falharia no pull.
+
+    A VM tem AcrPull por managed identity, mas o daemon do docker nao usa
+    RBAC: precisa de `docker login`. O token sai do IMDS e e trocado no
+    endpoint oauth2/exchange do proprio ACR, entao nao ha segredo em lugar
+    nenhum - nem no workflow, nem no script que fica gravado na VM.
+    """
+
+    def test_existe_passo_de_login_no_acr(self):
+        assert "oauth2/exchange" in texto(DEPLOY), (
+            "a VM nunca se autentica no ACR: o pull so funciona por cache"
+        )
+
+    def test_o_login_usa_a_identidade_gerenciada(self):
+        corpo = texto(DEPLOY)
+        assert "169.254.169.254" in corpo, (
+            "o token tem que vir do IMDS, nao de segredo configurado"
+        )
+
+    def test_a_sessao_e_encerrada_ao_final(self):
+        """`docker login` grava credencial em /root/.docker/config.json. Ela
+        precisa sair quando o deploy termina, inclusive se ele falhar."""
+        corpo = texto(DEPLOY)
+        assert "docker logout" in corpo, "a sessao do ACR fica aberta na VM"
+        assert "if: always()" in corpo, (
+            "o logout precisa rodar mesmo quando o deploy falha"
+        )
+
+    def test_o_login_vem_antes_da_troca(self):
+        # Sem os comentarios: eles CITAM `docker compose pull` ao explicar por
+        # que o login existe, e a citacao vem antes do proprio login.
+        util = "\n".join(
+            l for l in texto(DEPLOY).splitlines()
+            if not l.lstrip().startswith("#")
+        )
+        assert util.index("oauth2/exchange") < util.index("docker compose pull"), (
+            "autenticar depois do pull nao serve para nada"
+        )
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 
