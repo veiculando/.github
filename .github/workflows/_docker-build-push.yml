@@ -173,7 +173,9 @@ jobs:
           # --force porque `latest` e, por definicao, reescrita a cada release.
           # As tags semanticas nunca colidem; se colidirem, e sinal de tag git
           # reaproveitada e o problema esta antes daqui.
-          printf '%s' "$TAGS" | tr ',' '\n' | while read -r tag; do
+          # `printf '%s'` sem newline final faz o `read` devolver falso
+          # no EOF: o laco PULA a ultima tag, em silencio, com a run verde.
+          printf '%s\n' "$TAGS" | tr ',' '\n' | while read -r tag; do
             [ -n "$tag" ] || continue
             # Qualificado com o login server mesmo sendo a MESMA registry:
             # `repo@digest` sozinho e recusado com "Source cannot be found".

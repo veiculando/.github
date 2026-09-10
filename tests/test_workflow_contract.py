@@ -6,6 +6,7 @@ nao pode resolver uma tag que se move debaixo dele.
 """
 
 import re
+import subprocess
 
 import pytest
 import yaml
@@ -141,6 +142,40 @@ class TestPromocaoNaoRefaz_Build:
         passado, que e o pior lugar para descobrir isso.
         """
         assert '--source "$SERVER/$IMAGE@$DIGEST"' in texto(BUILD)
+
+    def test_todas_as_tags_da_promocao_sao_processadas(self, tmp_path):
+        """Executa o laco de tags de verdade, em vez de olhar o texto.
+
+        A promocao da v1.0.0 ficou VERDE e mesmo assim nao aplicou `latest`:
+        `printf '%s'` nao emite newline final, `read` devolve falso no EOF, e
+        o corpo do laco nunca roda para o ultimo item. Perder uma tag em
+        silencio e pior que falhar - a run diz que promoveu.
+
+        Os dois defeitos anteriores tambem passaram por assert de texto. Este
+        roda o comando.
+
+        O script vai para arquivo e e chamado por nome relativo: `bash -c`
+        com caminho absoluto tem os argumentos remontados pelo MSYS no
+        Windows, e o teste falharia por ambiente, nao por defeito.
+        """
+        linha = next(
+            l for l in texto(BUILD).splitlines() if "while read -r tag" in l
+        )
+        prefixo = linha.strip().split("while read")[0]
+        roteiro = tmp_path / "laco.sh"
+        roteiro.write_text(
+            'TAGS="1.0.0,latest"\n'
+            + prefixo
+            + 'while read -r tag; do echo "$tag"; done\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        saida = subprocess.run(
+            ["bash", "laco.sh"], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert saida.stdout.split() == ["1.0.0", "latest"], (
+            f"o laco emitiu {saida.stdout.split()!r}; stderr={saida.stderr!r}"
+        )
 
     def test_a_promocao_usa_import_no_registry(self):
         """`az acr import` copia server-side: nao ha pull, build nem push."""
