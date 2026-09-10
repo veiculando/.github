@@ -30,9 +30,13 @@ on:
         type: string
         default: '.'
       dockerfile:
-        description: Caminho do Dockerfile, relativo a raiz do repositorio.
+        description: >-
+          Caminho do Dockerfile, relativo a raiz do repositorio. Exigido no
+          modo build; ignorado na promocao. Nao pode ser `required`: o GitHub
+          valida inputs obrigatorios no startup, antes de qualquer `if`, e a
+          promocao - que nao constroi nada - nem iniciaria.
         type: string
-        required: true
+        default: ''
       acr-login-server:
         description: Login server do ACR (ex.- veiculandoacr.azurecr.io).
         type: string
@@ -77,11 +81,18 @@ jobs:
         env:
           DIGEST: ${{ inputs.promote-from-digest }}
           TAGS: ${{ inputs.promote-tags }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
         run: |
           set -euo pipefail
           if [ -z "$DIGEST" ]; then
             if [ -n "$TAGS" ]; then
               echo "::error::promote-tags exige promote-from-digest."
+              exit 1
+            fi
+            # O que se perdeu ao tirar o `required` e recuperado aqui, onde o
+            # modo ja e conhecido - e antes de qualquer passo caro.
+            if [ -z "$DOCKERFILE" ]; then
+              echo "::error::O modo build exige a entrada dockerfile."
               exit 1
             fi
             echo "Modo build."

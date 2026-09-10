@@ -136,6 +136,28 @@ class TestPromocaoNaoRefaz_Build:
         assert "az acr import" in texto(BUILD)
 
 
+    def test_nenhum_input_de_um_so_modo_e_obrigatorio(self):
+        """O GitHub valida `required` no STARTUP, antes de qualquer `if`.
+
+        Este workflow serve dois modos. Um input exigido apenas pelo build -
+        `dockerfile` - marcado como required faz a PROMOCAO nem iniciar:
+        `startup_failure` em 0s, sem log de passo nenhum. Foi exatamente o que
+        aconteceu com a tag v1.0.0. So o que os DOIS modos usam pode ser
+        obrigatorio; o resto e validado em runtime, onde o modo ja e conhecido.
+        """
+        declaradas = entradas(carregar(BUILD))
+        obrigatorias = {n for n, d in declaradas.items() if d.get("required")}
+        assert obrigatorias == {"image-name", "acr-login-server"}, (
+            f"obrigatorios de mais: {obrigatorias}"
+        )
+
+    def test_o_modo_build_exige_dockerfile_em_runtime(self):
+        """Tirar o `required` nao pode virar falhar tarde, dentro do docker."""
+        corpo = texto(BUILD)
+        assert "dockerfile" in corpo and "::error::" in corpo
+        assert 'DOCKERFILE' in corpo, "a validacao precisa ler o input"
+
+
 class TestDeployNaoResolveTagMovel:
     """BDD: o deploy nunca resolve `latest` nem qualquer tag movel.
 
