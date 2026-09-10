@@ -164,6 +164,7 @@ jobs:
         if: inputs.promote-from-digest != ''
         env:
           ACR: ${{ steps.acr.outputs.name }}
+          SERVER: ${{ inputs.acr-login-server }}
           IMAGE: ${{ inputs.image-name }}
           DIGEST: ${{ inputs.promote-from-digest }}
           TAGS: ${{ inputs.promote-tags }}
@@ -174,9 +175,11 @@ jobs:
           # reaproveitada e o problema esta antes daqui.
           printf '%s' "$TAGS" | tr ',' '\n' | while read -r tag; do
             [ -n "$tag" ] || continue
+            # Qualificado com o login server mesmo sendo a MESMA registry:
+            # `repo@digest` sozinho e recusado com "Source cannot be found".
             echo "Aplicando $tag em $IMAGE@$DIGEST"
             az acr import -n "$ACR" \
-              --source "$IMAGE@$DIGEST" \
+              --source "$SERVER/$IMAGE@$DIGEST" \
               -t "$IMAGE:$tag" \
               --force
           done

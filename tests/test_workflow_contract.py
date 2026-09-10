@@ -131,6 +131,17 @@ class TestPromocaoNaoRefaz_Build:
                 "o build precisa ser pulado quando ha digest de origem"
             )
 
+    def test_o_source_do_import_e_qualificado_com_o_login_server(self):
+        """`az acr import` recusa `repo@digest` mesmo na propria registry.
+
+        A mensagem que ele devolve - "Source cannot be found. Please
+        provide a valid image and source registry or a fully qualified
+        source" - nao diz que o que falta e o login server. Foi o que
+        reprovou a promocao da v1.0.0 DEPOIS de o login OIDC ja ter
+        passado, que e o pior lugar para descobrir isso.
+        """
+        assert '--source "$SERVER/$IMAGE@$DIGEST"' in texto(BUILD)
+
     def test_a_promocao_usa_import_no_registry(self):
         """`az acr import` copia server-side: nao ha pull, build nem push."""
         assert "az acr import" in texto(BUILD)
