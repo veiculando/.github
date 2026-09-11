@@ -40,3 +40,9 @@ jobs:
 
       - name: Testes de contrato
         run: python -m pytest tests/ -v
+
+      - name: As mutacoes precisam reprovar
+        # Os testes acima passando nao provam que eles reprovariam um workflow
+        # errado. Este passo viola cada invariante de concorrencia e exige que
+        # o teste correspondente falhe.
+        run: python tests/mutacoes_concorrencia.py

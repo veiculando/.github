@@ -123,6 +123,16 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # A extensao run-command aceita UMA execucao por vez por VM. Dois deploys
+    # simultaneos na mesma maquina se atropelam, e o que perde relata falha de
+    # health - um diagnostico que manda quem investiga para o lugar errado.
+    # Com cinco front-ends no pipeline, dois merges proximos ja bastam.
+    #
+    # `cancel-in-progress: false` de proposito: cancelar um deploy no meio da
+    # troca deixa o container em estado indefinido. Eles enfileiram.
+    concurrency:
+      group: deploy-vm-${{ inputs.resource-group }}-${{ inputs.vm-name }}
+      cancel-in-progress: false
     outputs:
       previous-digest: ${{ steps.anterior.outputs.digest }}
     steps:
@@ -142,6 +152,65 @@ jobs:
         run: |
           echo "::error::run-migrations exige migration-command."
           exit 1
+
+      - name: Preparar o invocador de run-command
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/invocar.sh" <<'INVOCADOR'
+          #!/usr/bin/env bash
+          # Invoca run-command na VM tolerando a serializacao da extensao.
+          #
+          # A extensao aceita UMA execucao por vez. Qualquer outra invocacao na
+          # mesma VM - outro deploy, um agente, uma pessoa no portal - devolve
+          # (Conflict) "Run command extension execution is in progress".
+          #
+          # Sem este laco o conflito aparecia como falha do passo que estivesse
+          # rodando. Em 11/09/2026 um deploy do front reprovou em "conferir
+          # saude" porque uma consulta paralela segurava a extensao: a mensagem
+          # culpava a aplicacao, que nunca chegou a ser consultada. Um
+          # diagnostico errado custa mais caro que a falha em si.
+          set -uo pipefail
+
+          RG="$1"; VM="$2"; ROTEIRO="$3"
+          MAX="${INVOCAR_TENTATIVAS:-10}"
+
+          tentativa=0
+          while :; do
+            tentativa=$((tentativa + 1))
+            saida="$(az vm run-command invoke -g "$RG" -n "$VM" \
+              --command-id RunShellScript \
+              --scripts "$ROTEIRO" \
+              --query "value[0].message" -o tsv 2>&1)"
+            rc=$?
+
+            if [ "$rc" -eq 0 ]; then
+              printf '%s' "$saida"
+              exit 0
+            fi
+
+            # So o conflito de concorrencia e retentavel. Falta de permissao ou
+            # roteiro invalido nao melhoram com espera, e insistir neles atrasa
+            # a falha e esconde a causa.
+            if ! printf '%s' "$saida" | grep -qE 'Conflict|execution is in progress'; then
+              printf '%s' "$saida" >&2
+              exit "$rc"
+            fi
+
+            if [ "$tentativa" -ge "$MAX" ]; then
+              printf '%s' "$saida" >&2
+              echo "::error::A extensao run-command seguiu ocupada apos ${MAX} tentativas." >&2
+              exit 1
+            fi
+
+            espera=$((tentativa * 6))
+            echo "::notice::run-command ocupado em ${VM}; nova tentativa em ${espera}s (${tentativa}/${MAX})" >&2
+            sleep "$espera"
+          done
+          INVOCADOR
+          chmod +x "${RUNNER_TEMP}/invocar.sh"
+          # Exportado no ambiente porque este workflow nao faz checkout: nao ha
+          # arquivo do repositorio para os passos seguintes chamarem.
+          echo "INVOCADOR=${RUNNER_TEMP}/invocar.sh" >> "$GITHUB_ENV"
 
       - name: Login no Azure (OIDC)
         uses: azure/login@v2
@@ -167,10 +236,7 @@ jobs:
           # workflow nem no script que o run-command grava em disco na VM:
           # tudo e obtido em tempo de execucao, dentro da maquina.
           roteiro="set -e; T=\$(curl -s -H Metadata:true 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"access_token\"])'); R=\$(curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d \"grant_type=access_token&service=${SERVER}&access_token=\$T\" 'https://${SERVER}/oauth2/exchange' | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"refresh_token\"])'); printf '%s' \"\$R\" | docker login '${SERVER}' -u 00000000-0000-0000-0000-000000000000 --password-stdin > /dev/null; echo LOGIN_ACR_OK"
-          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "$roteiro" \
-            --query "value[0].message" -o tsv)
+          saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro")
           if ! printf '%s' "$saida" | grep -q LOGIN_ACR_OK; then
             echo "::error::A VM nao conseguiu autenticar no ACR. Confira AcrPull na identidade da VM."
             printf '%s\n' "$saida"
@@ -189,10 +255,7 @@ jobs:
           # RepoDigests, e nao .Image: o Image ID e local a VM e nao serve para
           # repuxar a imagem anterior num rollback.
           roteiro="docker inspect --format '{{index .RepoDigests 0}}' \$(docker inspect --format '{{.Image}}' ${CONTAINER}) || echo DESCONHECIDO"
-          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "$roteiro" \
-            --query "value[0].message" -o tsv)
+          saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro")
           # A referencia COMPLETA (host/repo@digest), nao so o digest: o
           # rollback exporta este valor como imagem no compose, e `sha256:...`
           # sozinho nao e referencia valida. Foi assim que o rollback falhou
@@ -241,10 +304,7 @@ jobs:
           # mesmo env-file do stack. Se falhar, este passo falha e nenhum
           # container de producao foi tocado.
           roteiro="set -e; cd '${DIR}'; docker run --rm --env-file '${ENVFILE}' --network host '${REF}' ${COMANDO}; echo MIGRACAO_OK"
-          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "$roteiro" \
-            --query "value[0].message" -o tsv)
+          saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro")
           printf '%s\n' "$saida"
           if ! printf '%s' "$saida" | grep -q MIGRACAO_OK; then
             echo "::error::Migracao falhou. Troca abortada, producao intacta."
@@ -276,10 +336,7 @@ jobs:
           # servico: o arquivo na VM nao carrega referencia de imagem propria,
           # para que nao exista um segundo lugar de onde uma tag movel reentre.
           roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
-          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "$roteiro" \
-            --query "value[0].message" -o tsv)
+          saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro")
           printf '%s\n' "$saida"
           printf '%s' "$saida" | grep -q HEALTH_OK
 
@@ -302,10 +359,7 @@ jobs:
           # de 10/09/2026 o rollback relatou sucesso e producao continuou na
           # imagem que acabara de reprovar no health.
           roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${ANTERIOR}'; docker compose up -d --no-deps '${SERVICO}'; atual=\$(docker inspect --format '{{.Config.Image}}' '${CONTAINER}'); if [ \"\$atual\" = '${ANTERIOR}' ]; then echo ROLLBACK_OK; else echo \"ROLLBACK_DIVERGENTE atual=\$atual\"; exit 1; fi"
-          saida=$(az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "$roteiro" \
-            --query "value[0].message" -o tsv) || true
+          saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro") || true
           printf '%s\n' "$saida"
           if printf '%s' "$saida" | grep -q ROLLBACK_OK; then
             echo "::error::Health reprovou. Imagem revertida para ${ANTERIOR}. O SCHEMA NAO foi revertido."
@@ -327,7 +381,4 @@ jobs:
           SERVER: ${{ inputs.acr-login-server }}
         run: |
           set -euo pipefail
-          az vm run-command invoke -g "$RG" -n "$VM" \
-            --command-id RunShellScript \
-            --scripts "docker logout '${SERVER}' > /dev/null 2>&1; echo LOGOUT_OK" \
-            --query "value[0].message" -o tsv || true
+          bash "$INVOCADOR" "$RG" "$VM" "docker logout '${SERVER}' > /dev/null 2>&1; echo LOGOUT_OK" || true

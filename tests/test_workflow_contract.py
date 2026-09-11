@@ -417,6 +417,88 @@ class TestORollbackRestauraDeVerdade:
         )
 
 
+class TestODeployToleraConcorrencia:
+    """BDD: duas execucoes na mesma VM nao podem derrubar uma a outra.
+
+    Descoberto em 11/09/2026, no primeiro deploy do Veiculando.Web. A extensao
+    run-command aceita UMA execucao por vez por VM; uma consulta paralela
+    segurava a extensao, e o passo "Trocar o container e conferir saude"
+    recebeu `(Conflict) Run command extension execution is in progress`.
+
+    O rollback funcionou e producao ficou intacta - mas a run acusou falha de
+    HEALTH. A aplicacao nunca chegou a ser consultada: o roteiro foi recusado
+    antes de rodar. O diagnostico manda quem investiga procurar defeito na
+    imagem, que e o lugar errado, e isso custa mais caro que a falha.
+
+    Nao e hipotese remota: com os cinco front-ends entrando no pipeline, dois
+    merges proximos na mesma VM ja bastam.
+    """
+
+    def test_o_job_serializa_por_vm(self):
+        job = carregar(DEPLOY)["jobs"]["deploy"]
+        grupo = (job.get("concurrency") or {}).get("group", "")
+        assert "inputs.vm-name" in grupo and "inputs.resource-group" in grupo, (
+            "sem concurrency por VM, dois deploys na mesma maquina se atropelam"
+        )
+
+    def test_deploys_enfileiram_em_vez_de_cancelar(self):
+        job = carregar(DEPLOY)["jobs"]["deploy"]
+        assert (job.get("concurrency") or {}).get("cancel-in-progress") is False, (
+            "cancelar um deploy no meio da troca deixa o container em estado "
+            "indefinido: ele precisa enfileirar, nao ser interrompido"
+        )
+
+    def test_nenhuma_invocacao_escapa_do_invocador(self):
+        """A unica chamada direta legitima e a que vive DENTRO do invocador.
+
+        Uma invocacao que escape nao tem retry, e derruba o deploy inteiro no
+        primeiro conflito - com a mensagem do passo em que ela estiver.
+        """
+        util = [
+            l for l in texto(DEPLOY).splitlines()
+            if not l.lstrip().startswith("#")
+        ]
+        diretas = [l for l in util if "az vm run-command invoke" in l]
+        assert len(diretas) == 1, (
+            f"{len(diretas)} invocacoes diretas de run-command; esperado 1 "
+            "(a de dentro do invocador). As demais nao tem retry."
+        )
+
+    def test_o_invocador_e_escrito_antes_do_primeiro_uso(self):
+        passos = carregar(DEPLOY)["jobs"]["deploy"]["steps"]
+        preparo = next(
+            i for i, p in enumerate(passos)
+            if p.get("name", "").startswith("Preparar o invocador")
+        )
+        uso = next(
+            i for i, p in enumerate(passos)
+            if 'bash "$INVOCADOR"' in (p.get("run") or "")
+        )
+        assert preparo < uso, "o invocador e usado antes de existir"
+
+    def test_so_o_conflito_e_retentado(self):
+        """Retentar um erro de permissao atrasa a falha e esconde a causa.
+
+        Foi um `AuthorizationFailed` que travou o primeiro deploy da API: com
+        retry cego, aquilo teria levado minutos para aparecer, e apareceria
+        como timeout em vez de como falta de papel.
+        """
+        corpo = texto(DEPLOY)
+        assert "execution is in progress" in corpo, (
+            "o invocador precisa reconhecer o conflito da extensao"
+        )
+        assert re.search(r"grep -qE 'Conflict\|execution is in progress'", corpo), (
+            "sem o guarda, qualquer erro entra no laco de retry"
+        )
+
+    def test_o_retry_tem_teto(self):
+        corpo = texto(DEPLOY)
+        assert "INVOCAR_TENTATIVAS" in corpo, "o numero de tentativas e fixo"
+        assert "seguiu ocupada apos" in corpo, (
+            "um laco sem teto prende o runner ate o timeout do job"
+        )
+
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 
