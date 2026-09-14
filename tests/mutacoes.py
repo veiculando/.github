@@ -24,6 +24,7 @@ DEPLOY = Path(".github/workflows/_deploy-vm.yml")
 BUILD = Path(".github/workflows/_docker-build-push.yml")
 CONC = "tests/test_workflow_contract.py::TestODeployToleraConcorrencia"
 CORE = "tests/test_workflow_contract.py::TestOBuildPodeDependerDoCore"
+SONDA = "tests/test_workflow_contract.py::TestASondaAlcancaOServico"
 
 
 def mover_invocador(c: str) -> str:
@@ -78,6 +79,22 @@ CASOS = [
     (DEPLOY, CONC, "invocador movido para depois do primeiro uso",
      mover_invocador,
      "test_o_invocador_e_escrito_antes_do_primeiro_uso"),
+
+    # ---- sonda de saude ----------------------------------------------------
+    (DEPLOY, SONDA, "roteiro volta a ter curl fixo",
+     lambda c: c.replace("if ${sonda}; then echo HEALTH_OK",
+                         "if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK"),
+     "test_o_roteiro_usa_a_sonda_resolvida"),
+    (DEPLOY, SONDA, "nome do container da sonda sem validacao",
+     lambda c: c.replace(
+         '''              echo "::error::health-container invalido: $CONTAINER_SONDA"''',
+         '''              echo "::error::valor estranho"'''),
+     "test_o_nome_do_container_da_sonda_e_validado"),
+    (DEPLOY, SONDA, "sonda no container vira o padrao",
+     lambda c: c.replace(
+         "        default: ''\n      health-retries:",
+         "        default: 'algum-container'\n      health-retries:"),
+     "test_quem_publica_porta_nao_e_afetado"),
 
     # ---- build que depende do core ----------------------------------------
     (BUILD, CORE, "contexto fixo em source-dir",

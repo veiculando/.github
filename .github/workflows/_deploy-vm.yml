@@ -68,6 +68,14 @@ on:
         description: URL consultada de dentro da VM para aprovar a troca.
         type: string
         required: true
+      health-container:
+        description: >-
+          Quando preenchido, a sonda de saude roda DENTRO deste container, via
+          `docker exec`, em vez de partir do host. Necessario para servico que
+          nao publica porta: o host simplesmente nao o alcanca, e a sonda
+          falharia por rede, nao por saude - reprovando um deploy correto.
+        type: string
+        default: ''
       health-retries:
         description: Tentativas de health antes de declarar falha.
         type: number
@@ -321,6 +329,7 @@ jobs:
           SERVICO: ${{ inputs.compose-service }}
           VARIAVEL: ${{ inputs.image-ref-var }}
           URL: ${{ inputs.health-url }}
+          CONTAINER_SONDA: ${{ inputs.health-container }}
           TENTATIVAS: ${{ inputs.health-retries }}
           INTERVALO: ${{ inputs.health-interval }}
         run: |
@@ -332,10 +341,24 @@ jobs:
             echo "::error::image-ref-var invalido: $VARIAVEL"
             exit 1
           fi
+          # Servico sem porta publicada nao e alcancavel do host: a sonda tem
+          # que rodar DENTRO do container. Sem isto, um deploy correto reprova
+          # por rede e o rollback desfaz uma troca que estava boa.
+          if [ -n "$CONTAINER_SONDA" ]; then
+            # Mesmo cuidado do image-ref-var: este nome entra numa string de
+            # shell montada aqui e rodaria como root na VM.
+            if ! printf '%s' "$CONTAINER_SONDA" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*$'; then
+              echo "::error::health-container invalido: $CONTAINER_SONDA"
+              exit 1
+            fi
+            sonda="docker exec '${CONTAINER_SONDA}' curl -fsS -o /dev/null '${URL}'"
+          else
+            sonda="curl -fsS -o /dev/null '${URL}'"
+          fi
           # A variavel e a UNICA coisa que o compose interpola para este
           # servico: o arquivo na VM nao carrega referencia de imagem propria,
           # para que nao exista um segundo lugar de onde uma tag movel reentre.
-          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if curl -fsS -o /dev/null '${URL}'; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
+          roteiro="set -e; cd '${DIR}'; export ${VARIAVEL}='${REF}'; docker compose pull '${SERVICO}'; docker compose up -d --no-deps '${SERVICO}'; i=0; while [ \$i -lt ${TENTATIVAS} ]; do if ${sonda}; then echo HEALTH_OK; exit 0; fi; i=\$((i+1)); sleep ${INTERVALO}; done; echo HEALTH_FALHOU; exit 1"
           saida=$(bash "$INVOCADOR" "$RG" "$VM" "$roteiro")
           printf '%s\n' "$saida"
           printf '%s' "$saida" | grep -q HEALTH_OK

@@ -574,6 +574,46 @@ class TestOBuildPodeDependerDoCore:
                 )
 
 
+class TestASondaAlcancaOServico:
+    """BDD: servico sem porta publicada tambem precisa ser verificado.
+
+    O preview roda `core-api` e `fs` sem publicar porta - o BFF os alcanca por
+    DNS interno, e nada mais precisa. Uma sonda partindo do host falharia por
+    REDE, nao por saude: o deploy correto reprovaria e o rollback desfaria uma
+    troca que estava boa.
+
+    Publicar porta so para o health seria pior: o preview ja esta alcancavel em
+    HTTP puro por fora do Cloudflare (VEI-SUP-15), e a resposta nao e abrir
+    mais uma.
+    """
+
+    def test_a_sonda_pode_rodar_dentro_do_container(self):
+        corpo = texto(DEPLOY)
+        assert "docker exec" in corpo and "health-container" in corpo, (
+            "nao ha como verificar servico sem porta publicada"
+        )
+
+    def test_o_roteiro_usa_a_sonda_resolvida(self):
+        """Curl fixo no roteiro ignoraria health-container em silencio."""
+        corpo = texto(DEPLOY)
+        assert "if ${sonda}; then echo HEALTH_OK" in corpo, (
+            "o roteiro nao usa a sonda resolvida: health-container seria inerte"
+        )
+
+    def test_o_nome_do_container_da_sonda_e_validado(self):
+        """O nome entra numa string de shell montada e rodaria como root."""
+        corpo = texto(DEPLOY)
+        assert re.search(r"health-container invalido", corpo), (
+            "sem validacao, um valor como 'x; curl evil' vira comando na VM"
+        )
+
+    def test_quem_publica_porta_nao_e_afetado(self):
+        wf = carregar(DEPLOY)
+        assert entradas(wf)["health-container"]["default"] == "", (
+            "o default precisa ser vazio: api, fs e web sondam do host"
+        )
+
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 
