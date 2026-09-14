@@ -499,6 +499,81 @@ class TestODeployToleraConcorrencia:
         )
 
 
+class TestOBuildPodeDependerDoCore:
+    """BDD: um repositorio cujo Dockerfile referencia o core consegue publicar.
+
+    O BFF (Veiculando.WhiteLabel.Api) referencia cinco projetos do core por
+    caminho relativo, e o Dockerfile espera `Veiculando/` como diretorio IRMAO.
+    Era o unico dos tres repositorios WhiteLabel sem imagem publicada, e o
+    efeito aparecia no preview: os fronts ganharam imagem rastreavel ao commit
+    em 14/09/2026 e o BFF continuou num artefato de 27/08 publicado a mao, 13
+    commits atras.
+
+    Atualizar so os fronts poria codigo novo contra um BFF velho logo depois de
+    uma sprint que mexeu em multi-tenant - quebraria parecendo defeito da
+    sprint, e nao da montagem do ambiente.
+
+    O contrato copia o do `_dotnet-ci.yml`, que ja resolvia isto para a
+    compilacao. Dois contratos diferentes para a mesma necessidade seria pior
+    que o problema.
+    """
+
+    def test_o_contexto_muda_quando_o_core_entra(self):
+        """Com o core ao lado, o contexto tem que ser a raiz do workspace.
+
+        Restrito a `source-dir`, o docker nao enxerga o diretorio irmao e o
+        build morre no COPY com "file not found" - erro que nao diz nada sobre
+        a causa e manda procurar defeito no Dockerfile.
+        """
+        corpo = texto(BUILD)
+        linha = [l for l in corpo.splitlines() if l.strip().startswith("context:")]
+        assert linha, "o passo de build nao declara contexto"
+        assert "needs-core" in linha[0], (
+            "o contexto e fixo em source-dir: com needs-core o COPY do core falha"
+        )
+
+    def test_o_pin_do_core_e_validado(self):
+        """Nome de branch ou SHA abreviado nao garante build reproduzivel."""
+        corpo = texto(BUILD)
+        assert re.search(r"\[0-9a-f\]\{40\}", corpo), (
+            "o pin do core nao e validado como SHA completo de 40 hex"
+        )
+
+    def test_o_core_e_fixado_pelo_arquivo_e_nao_por_branch(self):
+        wf = carregar(BUILD)
+        passos = wf["jobs"]["build-push"]["steps"]
+        ck = [p for p in passos if "core na ref fixada" in (p.get("name") or "")]
+        assert ck, "falta o checkout do core"
+        assert "steps.coreref.outputs.sha" in ck[0]["with"]["ref"], (
+            "o core precisa vir da ref resolvida do arquivo, nao de um branch"
+        )
+
+    def test_a_falta_do_token_falha_cedo_e_explicada(self):
+        """Sem o guard, a falha aparece la na frente como COPY sem arquivo."""
+        corpo = texto(BUILD)
+        assert "Secret 'core-repo-token' ausente" in corpo, (
+            "falta o guard de token; a falha apareceria no docker, sem causa"
+        )
+
+    def test_o_token_do_core_e_opcional(self):
+        """Repositorio autocontido nao pode ser obrigado a informar o token."""
+        wf = carregar(BUILD)
+        segredos = gatilhos(wf)["workflow_call"]["secrets"]
+        assert segredos["core-repo-token"].get("required") is not True, (
+            "core-repo-token obrigatorio quebraria quem nao depende do core"
+        )
+
+    def test_o_core_nao_entra_na_promocao(self):
+        """Promocao nao constroi nada: re-etiqueta um digest ja publicado."""
+        wf = carregar(BUILD)
+        passos = wf["jobs"]["build-push"]["steps"]
+        for p in passos:
+            if "core" in (p.get("name") or "").lower():
+                assert "promote-from-digest == ''" in p.get("if", ""), (
+                    f"'{p['name']}' roda na promocao, que nao faz checkout"
+                )
+
+
 class TestTodosOsWorkflowsSaoValidos:
     """Rede de seguranca: um YAML quebrado aqui derruba todos os chamadores."""
 

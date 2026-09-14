@@ -41,6 +41,32 @@ on:
         description: Login server do ACR (ex.- veiculandoacr.azurecr.io).
         type: string
         required: true
+      needs-core:
+        description: >-
+          Faz checkout adicional do core como diretorio irmao, fixado na ref
+          lida de `core-ref-file`. Necessario quando o Dockerfile referencia
+          projetos do core por caminho relativo. Quando ligado, o CONTEXTO do
+          build passa a ser a raiz do workspace, e nao `source-dir`, para que
+          os dois diretorios fiquem visiveis ao docker.
+        type: boolean
+        default: false
+      core-repo:
+        description: Repositorio do core.
+        type: string
+        default: 'veiculando/Veiculando'
+      core-dir:
+        description: >-
+          Diretorio em que o core e clonado. Precisa casar exatamente com o
+          nome usado nos ProjectReference e nos COPY do Dockerfile.
+        type: string
+        default: 'Veiculando'
+      core-ref-file:
+        description: >-
+          Arquivo, dentro do repositorio chamador, com o SHA completo do core.
+          Um pin em arquivo versionado e o que torna o build reproduzivel: sem
+          ele, o mesmo commit produz binarios diferentes conforme o dia.
+        type: string
+        default: 'core.ref'
       promote-from-digest:
         description: >-
           Quando preenchido, o build e PULADO e o digest informado recebe as
@@ -52,6 +78,10 @@ on:
         type: string
         default: ''
     secrets:
+      core-repo-token:
+        description: >-
+          Token de leitura do core. Exigido apenas quando `needs-core` e true.
+        required: false
       azure-client-id:
         required: true
       azure-tenant-id:
@@ -110,12 +140,54 @@ jobs:
           fi
           echo "Modo promocao."
 
+      - name: Guard - token do core presente
+        if: inputs.promote-from-digest == '' && inputs.needs-core
+        env:
+          CORE_TOKEN: ${{ secrets.core-repo-token }}
+        run: |
+          if [ -z "$CORE_TOKEN" ]; then
+            echo "::error::Secret 'core-repo-token' ausente."
+            echo "O core e privado e o build depende dele. Sem o token o docker"
+            echo "falharia mais tarde, no COPY, com 'file not found' - erro que"
+            echo "nao diz nada sobre a causa."
+            exit 1
+          fi
+
       - name: Checkout
         if: inputs.promote-from-digest == ''
         uses: actions/checkout@v4
         with:
           # Mesma convencao do `_dotnet-ci.yml`: o chamador nomeia o diretorio.
           path: ${{ inputs.source-dir }}
+
+      - name: Resolver ref fixada do core
+        if: inputs.promote-from-digest == '' && inputs.needs-core
+        id: coreref
+        run: |
+          set -euo pipefail
+          FILE="${{ inputs.source-dir }}/${{ inputs.core-ref-file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Arquivo de pin do core nao encontrado: $FILE"
+            exit 1
+          fi
+          SHA="$(grep -v '^[[:space:]]*#' "$FILE" | grep -v '^[[:space:]]*$' | head -n1 | tr -d '[:space:]')"
+          # Mesma regra do _dotnet-ci.yml: SHA abreviado ou nome de branch nao
+          # garante build reproduzivel, entao sao recusados.
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Pin do core invalido: '$SHA'. Esperado SHA completo de 40 hex."
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Core fixado em $SHA"
+
+      - name: Checkout do core na ref fixada
+        if: inputs.promote-from-digest == '' && inputs.needs-core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.core-repo }}
+          ref: ${{ steps.coreref.outputs.sha }}
+          token: ${{ secrets.core-repo-token }}
+          path: ${{ inputs.core-dir }}
 
       - name: Login no Azure (OIDC)
         uses: azure/login@v2
@@ -144,7 +216,10 @@ jobs:
         if: inputs.promote-from-digest == ''
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.source-dir }}
+          # Com o core ao lado, o contexto precisa ser a raiz do workspace:
+          # o Dockerfile faz COPY de `Veiculando/` E de `source-dir`, e um
+          # contexto restrito a source-dir nao enxerga o irmao.
+          context: ${{ inputs.needs-core && '.' || inputs.source-dir }}
           # `file` e relativo ao workspace, nao ao contexto: sem o prefixo, um
           # chamador que clone em subdiretorio nao acha o proprio Dockerfile.
           file: ${{ inputs.source-dir }}/${{ inputs.dockerfile }}
