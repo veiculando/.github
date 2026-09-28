@@ -1,0 +1,108 @@
+name: preview-logs
+
+# Le logs de um servico do preview sem acesso root a VM (VEI-RD-102).
+#
+# Somente leitura. Executa na VM, via `az vm run-command`, o script FIXO
+# `.github/scripts/preview-logs-remote.sh`, o mesmo mecanismo e a mesma
+# identidade OIDC do deploy de preview. Nenhum input vira comando:
+#   - todo input entra por `env:`, nunca por `${{ }}` dentro de `run:`;
+#   - e validado aqui, ANTES do login no Azure (input invalido nao toca a VM);
+#   - e revalidado no script remoto, que o trata como dado.
+#
+# Uso por agente: ver docs/runbook-preview-logs.md no Veiculando.WhiteLabel.Api.
+
+on:
+  workflow_dispatch:
+    inputs:
+      servico:
+        description: Servico do stack veiculando-preview.
+        type: choice
+        options: [bff, exibidora, app, edge, core]
+        default: bff
+        required: true
+      since:
+        description: Janela de tempo (ex. 30m, 2h, 90s). Regex ^[0-9]+[smh]$.
+        type: string
+        default: 30m
+        required: true
+      tail:
+        description: Maximo de linhas (1 a 5000).
+        type: string
+        default: '500'
+        required: true
+      trace:
+        description: Filtro opcional (traceId). Regex ^[A-Za-z0-9-]+$.
+        type: string
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    # Os secrets AZURE_* e o federated credential
+    # `repo:veiculando/.github:environment:preview` vivem neste environment.
+    environment: preview
+    timeout-minutes: 10
+    steps:
+      - name: Validar inputs (antes de tocar o Azure)
+        env:
+          SERVICO: ${{ inputs.servico }}
+          SINCE: ${{ inputs.since }}
+          TAIL: ${{ inputs.tail }}
+          TRACE: ${{ inputs.trace }}
+        run: |
+          set -euo pipefail
+          case "$SERVICO" in
+            bff|exibidora|app|edge|core) ;;
+            *) echo "::error::servico fora da whitelist"; exit 1 ;;
+          esac
+          [[ "$SINCE" =~ ^[0-9]+[smh]$ ]] || { echo "::error::since invalido"; exit 1; }
+          [[ "$TAIL" =~ ^[0-9]{1,4}$ ]] && (( TAIL >= 1 && TAIL <= 5000 )) || { echo "::error::tail invalido (1..5000)"; exit 1; }
+          [[ -z "$TRACE" || "$TRACE" =~ ^[A-Za-z0-9-]{1,128}$ ]] || { echo "::error::trace invalido"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ler logs na VM
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          VM_NAME: ${{ vars.AZURE_VM_NAME }}
+          SERVICO: ${{ inputs.servico }}
+          SINCE: ${{ inputs.since }}
+          TAIL: ${{ inputs.tail }}
+          TRACE: ${{ inputs.trace }}
+        run: |
+          set -euo pipefail
+          : "${RESOURCE_GROUP:?Configure AZURE_RESOURCE_GROUP no environment preview}"
+          : "${VM_NAME:?Configure AZURE_VM_NAME no environment preview}"
+          result="$(az vm run-command invoke \
+            --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts @.github/scripts/preview-logs-remote.sh \
+            --parameters "SERVICO=$SERVICO" "SINCE=$SINCE" "TAIL=$TAIL" "TRACE=$TRACE" \
+            --query 'value[0].message' --output tsv)"
+          printf '%s\n' "$result" > preview-logs.txt
+          cat preview-logs.txt
+          # O control plane do Run Command reporta sucesso mesmo quando o
+          # script falha; so o marcador prova que ele chegou ao fim.
+          grep -Fq 'PREVIEW_LOGS=ok' preview-logs.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview-logs
+          path: preview-logs.txt
+          if-no-files-found: ignore
+          retention-days: 7
