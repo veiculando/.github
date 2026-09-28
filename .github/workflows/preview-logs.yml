@@ -17,7 +17,7 @@ on:
       servico:
         description: Servico do stack veiculando-preview.
         type: choice
-        options: [bff, exibidora, app, edge, core]
+        options: [bff, exibidora, app, edge, core-api, migrator]
         default: bff
         required: true
       since:
@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$SERVICO" in
-            bff|exibidora|app|edge|core) ;;
+            bff|exibidora|app|edge|core-api|migrator) ;;
             *) echo "::error::servico fora da whitelist"; exit 1 ;;
           esac
           [[ "$SINCE" =~ ^[0-9]+[smh]$ ]] || { echo "::error::since invalido"; exit 1; }

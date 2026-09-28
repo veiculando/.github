@@ -16,7 +16,7 @@ from conftest import RAIZ, carregar, gatilhos, texto
 
 WF = "preview-logs.yml"
 REMOTO = RAIZ / ".github" / "scripts" / "preview-logs-remote.sh"
-WHITELIST = ["bff", "exibidora", "app", "edge", "core"]
+WHITELIST = ["bff", "exibidora", "app", "edge", "core-api", "migrator"]
 BASH = shutil.which("bash")
 
 

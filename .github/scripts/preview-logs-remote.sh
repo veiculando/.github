@@ -10,7 +10,7 @@
 #   que o workflow ja os tenha validado, e nunca sao avaliados pelo shell.
 #
 # Parametros posicionais (formato do `az vm run-command --parameters`):
-#   SERVICO=<bff|exibidora|app|edge|core> SINCE=<n[smh]> TAIL=<1..5000> TRACE=<[A-Za-z0-9-]*>
+#   SERVICO=<bff|exibidora|app|edge|core-api|migrator> SINCE=<n[smh]> TAIL=<1..5000> TRACE=<[A-Za-z0-9-]*>
 
 # Run Command usa /bin/sh; o resto do script precisa de bash.
 if [ -z "${BASH_VERSION:-}" ]; then exec /usr/bin/env bash "$0" "$@"; fi
@@ -35,7 +35,7 @@ tail_n="${3#TAIL=}"
 trace="${4#TRACE=}"
 
 case "$servico" in
-  bff|exibidora|app|edge|core) ;;
+  bff|exibidora|app|edge|core-api|migrator) ;;
   *) echo "PREVIEW_LOGS=invalid-input servico"; exit 64 ;;
 esac
 [[ "$since" =~ ^[0-9]+[smh]$ ]] || { echo "PREVIEW_LOGS=invalid-input since"; exit 64; }
