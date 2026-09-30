@@ -103,6 +103,14 @@ class TestServicoForaDaWhitelistFalhaSemTocarAVm:
         assert "PREVIEW_LOGS=invalid-input" in r.stdout
 
 
+    def test_script_remoto_aceita_trace_omitido(self):
+        # O Azure descarta o parametro TRACE= vazio; com 3 argumentos o script
+        # tem de seguir ate a validacao, nao morrer com "unbound variable".
+        r = remoto("SERVICO=db", "SINCE=30m", "TAIL=10")
+        assert r.returncode == 64, r.stdout + r.stderr
+        assert "PREVIEW_LOGS=invalid-input servico" in r.stdout
+
+
 class TestNenhumInputViraComando:
     """BDD: nao ha parametro que permita comando arbitrario na VM."""
 

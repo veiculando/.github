@@ -32,7 +32,10 @@ if [[ "${PREVIEW_LOGS_SOURCE_ONLY:-}" == 1 ]]; then return 0 2>/dev/null || exit
 servico="${1#SERVICO=}"
 since="${2#SINCE=}"
 tail_n="${3#TAIL=}"
-trace="${4#TRACE=}"
+# O RunShellScript do Azure omite parametro de valor vazio: sem trace, o
+# script recebe so tres argumentos e "$4" derrubaria o set -u.
+trace="${4:-TRACE=}"
+trace="${trace#TRACE=}"
 
 case "$servico" in
   bff|exibidora|app|edge|core-api|migrator) ;;
